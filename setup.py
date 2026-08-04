@@ -65,8 +65,12 @@ def check_pytorch() -> None:
         warnings.warn(f"MoK should run with PyTorch CUDA {torch.version.cuda}, but it is built and tested for CUDA 13.0.", RuntimeWarning, stacklevel=2)
 
 
-def check_nvcc() -> None:
-    nvcc_name = os.environ.get("NVCC", "nvcc")
+def get_nvcc_name() -> str:
+    return os.environ.get("MOK_NVCC", os.environ.get("NVCC", "nvcc"))
+
+
+def check_nvcc() -> str:
+    nvcc_name = get_nvcc_name()
     nvcc = shutil.which(nvcc_name)
     if nvcc is None:
         raise RuntimeError(
@@ -92,6 +96,8 @@ def check_nvcc() -> None:
             f"NVCC {nvcc_version[0]}.{nvcc_version[1]} does not match PyTorch CUDA {torch.version.cuda}. "
             "Install the matching CUDA toolkit or ensure PATH points to its bin directory."
         )
+
+    return nvcc
 
 
 def check_thunderkittens() -> None:
@@ -119,7 +125,7 @@ class MoKBuildExtension(build_ext):
         check_make()
         check_python()
         check_pytorch()
-        check_nvcc()
+        nvcc = check_nvcc()
         check_thunderkittens()
 
         pytorch_includes = " ".join(f"-I{path}" for path in include_paths())
@@ -130,7 +136,7 @@ class MoKBuildExtension(build_ext):
         subprocess.check_call([
             "make",
             f"SRC={REPO_ROOT / 'csrc' / 'bindings.cu'}",
-            f"NVCC={os.environ.get('MOK_NVCC', 'nvcc')}",
+            f"NVCC={nvcc}",
             f"ARCH={os.environ.get('MOK_ARCH', 'SM103')}",
             f"PYTHON={sys.executable}",
             f"THUNDERKITTENS_ROOT={THUNDERKITTENS_ROOT}",

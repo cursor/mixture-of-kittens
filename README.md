@@ -53,6 +53,12 @@ To build for SM100 instead, set the `MOK_ARCH` environment variable:
 MOK_ARCH=SM100 pip install . --no-build-isolation
 ```
 
+To use a specific CUDA compiler, set `MOK_NVCC` (or `NVCC`). The selected compiler is used for both the CUDA version check and the build:
+
+```bash
+MOK_NVCC=/path/to/cuda-13.0/bin/nvcc pip install . --no-build-isolation
+```
+
 To verify the installation:
 
 ```bash

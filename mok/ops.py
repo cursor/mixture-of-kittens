@@ -3,6 +3,14 @@ import torch
 from . import _C
 
 
+def _validate_contiguous_tensors(
+    tensors: tuple[tuple[str, torch.Tensor], ...],
+) -> None:
+    for tensor_name, tensor in tensors:
+        if not tensor.is_contiguous():
+            raise ValueError(f"{tensor_name} must be contiguous")
+
+
 @torch.library.custom_op("mok::all_gather_top_experts", mutates_args=("all_gather_top_experts_buffer",))
 def all_gather_top_experts(
     top_experts: torch.Tensor,
@@ -324,6 +332,17 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
     for tensor_name, tensor, expected_shape in expected_shapes:
         if tuple(tensor.shape) != expected_shape:
             raise ValueError(f"{tensor_name} must have shape {expected_shape}")
+    _validate_contiguous_tensors((
+        ("w_shared_gate", w_shared_gate),
+        ("w_routed_gate", w_routed_gate),
+        ("w_routed_gate_sc", w_routed_gate_sc),
+        ("w_shared_up", w_shared_up),
+        ("w_routed_up", w_routed_up),
+        ("w_routed_up_sc", w_routed_up_sc),
+        ("w_shared_down", w_shared_down),
+        ("w_routed_down", w_routed_down),
+        ("w_routed_down_sc", w_routed_down_sc),
+    ))
     for tensor_name, tensor in (
         ("combine_buffer", combine_buffer),
         ("w_shared_gate", w_shared_gate),
@@ -481,6 +500,14 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     for tensor_name, tensor, expected_shape in expected_shapes:
         if tuple(tensor.shape) != expected_shape:
             raise ValueError(f"{tensor_name} must have shape {expected_shape}")
+    _validate_contiguous_tensors((
+        ("w_shared_gate", w_shared_gate),
+        ("w_routed_gate", w_routed_gate),
+        ("w_shared_up", w_shared_up),
+        ("w_routed_up", w_routed_up),
+        ("w_shared_down", w_shared_down),
+        ("w_routed_down", w_routed_down),
+    ))
     for tensor_name, tensor in (
         ("combine_buffer", combine_buffer),
         ("w_shared_gate", w_shared_gate),
@@ -731,6 +758,21 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     for tensor_name, tensor, expected_shape in expected_shapes:
         if tuple(tensor.shape) != expected_shape:
             raise ValueError(f"{tensor_name} must have shape {expected_shape}")
+    _validate_contiguous_tensors((
+        ("w_shared_gate", w_shared_gate),
+        ("w_routed_gate_T", w_routed_gate_T),
+        ("w_routed_gate_T_sc", w_routed_gate_T_sc),
+        ("w_shared_up", w_shared_up),
+        ("w_routed_up_T", w_routed_up_T),
+        ("w_routed_up_T_sc", w_routed_up_T_sc),
+        ("w_shared_down", w_shared_down),
+        ("w_routed_down_T", w_routed_down_T),
+        ("w_routed_down_T_sc", w_routed_down_T_sc),
+        ("w_routed_gate", w_routed_gate),
+        ("w_routed_gate_sc", w_routed_gate_sc),
+        ("w_routed_up", w_routed_up),
+        ("w_routed_up_sc", w_routed_up_sc),
+    ))
     for tensor_name, tensor in (
         ("d_y_buffer", d_y_buffer),
         ("d_x_routed_buffer", d_x_routed_buffer),
@@ -972,6 +1014,14 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     for tensor_name, tensor, expected_shape in expected_shapes:
         if tuple(tensor.shape) != expected_shape:
             raise ValueError(f"{tensor_name} must have shape {expected_shape}")
+    _validate_contiguous_tensors((
+        ("w_shared_gate", w_shared_gate),
+        ("w_routed_gate", w_routed_gate),
+        ("w_shared_up", w_shared_up),
+        ("w_routed_up", w_routed_up),
+        ("w_shared_down", w_shared_down),
+        ("w_routed_down", w_routed_down),
+    ))
     for tensor_name, tensor, _ in expected_shapes:
         if tensor.device != x.device:
             raise ValueError(f"{tensor_name} must be on {x.device}")

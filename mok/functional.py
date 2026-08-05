@@ -87,6 +87,7 @@ class MoKWorkspace:
 
 
 _WORKSPACE_CACHE: dict[tuple[str, int, int, int, int, int], MoKWorkspace] = {}
+_SUPPORTED_COMPUTE_CAPABILITIES = ((10, 0), (10, 3))
 
 
 def validate_workspace_args(
@@ -129,8 +130,8 @@ def validate_workspace_args(
     device = torch.device("cuda", device_index)
     if device_index != torch.cuda.current_device():
         raise ValueError("MoK workspace device must be the current CUDA device")
-    if torch.cuda.get_device_capability(device) != (10, 3):
-        raise NotImplementedError("MoK currently requires an SM103 GPU")
+    if torch.cuda.get_device_capability(device) not in _SUPPORTED_COMPUTE_CAPABILITIES:
+        raise NotImplementedError("MoK currently requires an SM100 or SM103 GPU")
     device_properties = torch.cuda.get_device_properties(device)
     if type(num_local_tokens) is not int or num_local_tokens < 512:
         raise ValueError("num_local_tokens must be an integer at least 512")

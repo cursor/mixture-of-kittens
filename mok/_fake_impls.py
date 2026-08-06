@@ -299,6 +299,21 @@ def _dispatch_mlp_swiglu_combine_bwd_bf16_fake(
     )
 
 
+# situ-glu has the same saved-tensor and gradient layouts as swiglu.
+torch.library.register_fake("mok::dispatch_mlp_situglu_combine_fwd_mxfp8")(
+    _dispatch_mlp_swiglu_combine_fwd_mxfp8_fake
+)
+torch.library.register_fake("mok::dispatch_mlp_situglu_combine_fwd_bf16")(
+    _dispatch_mlp_swiglu_combine_fwd_bf16_fake
+)
+torch.library.register_fake("mok::dispatch_mlp_situglu_combine_bwd_mxfp8")(
+    _dispatch_mlp_swiglu_combine_bwd_mxfp8_fake
+)
+torch.library.register_fake("mok::dispatch_mlp_situglu_combine_bwd_bf16")(
+    _dispatch_mlp_swiglu_combine_bwd_bf16_fake
+)
+
+
 @torch.library.register_fake("mok::fwd_epilogue")
 def _fwd_epilogue_fake(
     y_shared: torch.Tensor,

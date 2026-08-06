@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 import torch.distributed as dist
@@ -14,6 +14,10 @@ from .ops import (
     dispatch_mlp_swiglu_combine_bwd_bf16,
     dispatch_mlp_swiglu_combine_fwd_mxfp8,
     dispatch_mlp_swiglu_combine_fwd_bf16,
+    dispatch_mlp_situglu_combine_bwd_mxfp8,
+    dispatch_mlp_situglu_combine_bwd_bf16,
+    dispatch_mlp_situglu_combine_fwd_mxfp8,
+    dispatch_mlp_situglu_combine_fwd_bf16,
     fwd_epilogue,
     schedule,
 )
@@ -27,6 +31,7 @@ class MoKConfig:
     macrobatch_size: int = 131072
     schedule_capacity_multiplier: float = 0.5
     all_gather_top_experts_chunk_bytes: int = 2048
+    activation: Literal["swiglu", "situglu"] = "swiglu"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +51,7 @@ class MoKForwardContext:
     up_routed: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
     hidden_shared: torch.Tensor
     hidden_routed: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    activation: Literal["swiglu", "situglu"] = "swiglu"
 
 
 @dataclass(slots=True)
@@ -373,6 +379,8 @@ def build_schedule(
         raise TypeError("workspace must be a MoKWorkspace")
     if not isinstance(config, MoKConfig):
         raise TypeError("config must be a MoKConfig")
+    if config.activation not in ("swiglu", "situglu"):
+        raise ValueError("activation must be 'swiglu' or 'situglu'")
     device_properties = torch.cuda.get_device_properties(workspace.device)
     if type(config.fwd_num_comm_sms) is not int or config.fwd_num_comm_sms <= 0:
         raise ValueError("fwd_num_comm_sms must be a positive integer")
@@ -453,6 +461,8 @@ def validate_inputs(
     """
     if not isinstance(config, MoKConfig):
         raise TypeError("config must be a MoKConfig")
+    if config.activation not in ("swiglu", "situglu"):
+        raise ValueError("activation must be 'swiglu' or 'situglu'")
     if not isinstance(workspace, MoKWorkspace):
         raise TypeError("workspace must be a MoKWorkspace")
     if not isinstance(schedule, MoKSchedule):
@@ -507,6 +517,16 @@ def forward(
         forward_context: MoKForwardContext
     """
     validate_inputs(config, workspace, schedule, x, router_weights)
+    fwd_mxfp8_op = (
+        dispatch_mlp_situglu_combine_fwd_mxfp8
+        if config.activation == "situglu"
+        else dispatch_mlp_swiglu_combine_fwd_mxfp8
+    )
+    fwd_bf16_op = (
+        dispatch_mlp_situglu_combine_fwd_bf16
+        if config.activation == "situglu"
+        else dispatch_mlp_swiglu_combine_fwd_bf16
+    )
 
     workspace.x_buffer.copy_(x)  # TODO: we can remove this
     workspace.router_weight_buffer.copy_(router_weights)
@@ -521,7 +541,7 @@ def forward(
          gate_shared, gate_fp8_routed, gate_sc_routed,
          up_shared, up_fp8_routed, up_sc_routed,
          hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed,
-         y_shared, y_routed) = dispatch_mlp_swiglu_combine_fwd_mxfp8(
+         y_shared, y_routed) = fwd_mxfp8_op(
             workspace.x_buffer, workspace.x_buffer_ptrs,
             workspace.combine_buffer, workspace.combine_buffer_ptrs,
             shared_gate_weights, routed_gate_weights_fp8, routed_gate_weights_sc,
@@ -540,10 +560,11 @@ def forward(
             up_routed=(up_fp8_routed, up_sc_routed),
             hidden_shared=hidden_shared,
             hidden_routed=(hidden_fp8_t_routed, hidden_sc_t_routed),
+            activation=config.activation,
         )
     else:
         (x_routed, gate_shared, gate_routed, up_shared, up_routed,
-         hidden_shared, hidden_routed, y_shared, y_routed) = dispatch_mlp_swiglu_combine_fwd_bf16(
+         hidden_shared, hidden_routed, y_shared, y_routed) = fwd_bf16_op(
             workspace.x_buffer, workspace.x_buffer_ptrs,
             workspace.combine_buffer, workspace.combine_buffer_ptrs,
             shared_gate_weights, routed_gate_weights,
@@ -562,6 +583,7 @@ def forward(
             up_routed=up_routed,
             hidden_shared=hidden_shared,
             hidden_routed=hidden_routed,
+            activation=config.activation,
         )
 
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
@@ -624,6 +646,18 @@ def backward(
     validate_inputs(config, workspace, schedule, x, router_weights, grad_output)
     if not isinstance(forward_context, MoKForwardContext):
         raise TypeError("forward_context must be a MoKForwardContext")
+    if forward_context.activation != config.activation:
+        raise ValueError("forward_context activation does not match config activation")
+    bwd_mxfp8_op = (
+        dispatch_mlp_situglu_combine_bwd_mxfp8
+        if config.activation == "situglu"
+        else dispatch_mlp_swiglu_combine_bwd_mxfp8
+    )
+    bwd_bf16_op = (
+        dispatch_mlp_situglu_combine_bwd_bf16
+        if config.activation == "situglu"
+        else dispatch_mlp_swiglu_combine_bwd_bf16
+    )
 
     workspace.d_y_buffer.copy_(grad_output)                # TODO: we can remove this
     workspace.x_buffer.copy_(x)                            # TODO: we can remove this
@@ -645,7 +679,7 @@ def backward(
          d_up_shared, d_up_fp8_routed, d_up_sc_routed,
          d_hidden_shared, d_hidden_routed, d_y_fp8_routed, d_y_sc_routed,
          d_w_shared_gate, d_w_routed_gate, d_w_shared_up, d_w_routed_up,
-         d_w_shared_down, d_w_routed_down) = dispatch_mlp_swiglu_combine_bwd_mxfp8(
+         d_w_shared_down, d_w_routed_down) = bwd_mxfp8_op(
             workspace.d_y_buffer, workspace.d_y_buffer_ptrs,
             workspace.d_x_routed_buffer, workspace.d_x_routed_buffer_ptrs,
             workspace.router_weight_buffer, workspace.router_weight_buffer_ptrs,
@@ -673,7 +707,7 @@ def backward(
         (d_x_shared, d_x_routed, d_gate_shared, d_gate_routed,
          d_up_shared, d_up_routed, d_hidden_shared, d_hidden_routed, d_y_routed,
          d_w_shared_gate, d_w_routed_gate, d_w_shared_up, d_w_routed_up,
-         d_w_shared_down, d_w_routed_down) = dispatch_mlp_swiglu_combine_bwd_bf16(
+         d_w_shared_down, d_w_routed_down) = bwd_bf16_op(
             workspace.d_y_buffer, workspace.d_y_buffer_ptrs,
             workspace.d_x_routed_buffer, workspace.d_x_routed_buffer_ptrs,
             workspace.router_weight_buffer, workspace.router_weight_buffer_ptrs,

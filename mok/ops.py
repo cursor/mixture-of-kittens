@@ -191,8 +191,8 @@ def mxfp8_quantize(
     return _C.mxfp8_quantize(x_bf16, return_normal, return_transposed)
 
 
-@torch.library.custom_op("mok::dispatch_mlp_swiglu_combine_fwd_mxfp8", mutates_args=("combine_buffer",))
-def dispatch_mlp_swiglu_combine_fwd_mxfp8(
+def _dispatch_mlp_glu_combine_fwd_mxfp8_impl(
+    native_op,
     x: torch.Tensor,
     x_ptrs: list[int],
     combine_buffer: torch.Tensor,
@@ -354,7 +354,7 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
     if tuple(tokens_per_expert.shape) != (num_local_experts,):
         raise ValueError("tokens_per_expert must have shape (num_local_experts,)")
 
-    return _C.dispatch_mlp_swiglu_combine_fwd_mxfp8(
+    return native_op(
         x, x_ptrs, combine_buffer, combine_buffer_ptrs,
         w_shared_gate, w_routed_gate, w_routed_gate_sc,
         w_shared_up, w_routed_up, w_routed_up_sc,
@@ -364,8 +364,8 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
     )
 
 
-@torch.library.custom_op("mok::dispatch_mlp_swiglu_combine_fwd_bf16", mutates_args=("combine_buffer",))
-def dispatch_mlp_swiglu_combine_fwd_bf16(
+def _dispatch_mlp_glu_combine_fwd_bf16_impl(
+    native_op,
     x: torch.Tensor,
     x_ptrs: list[int],
     combine_buffer: torch.Tensor,
@@ -497,7 +497,7 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
         if tensor.device != x.device:
             raise ValueError(f"{tensor_name} must be on {x.device}")
 
-    return _C.dispatch_mlp_swiglu_combine_fwd_bf16(
+    return native_op(
         x, x_ptrs, combine_buffer, combine_buffer_ptrs,
         w_shared_gate, w_routed_gate, w_shared_up, w_routed_up,
         w_shared_down, w_routed_down,
@@ -506,14 +506,8 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     )
 
 
-@torch.library.custom_op(
-    "mok::dispatch_mlp_swiglu_combine_bwd_mxfp8",
-    mutates_args=("d_x_routed_buffer", "d_router_weight_buffer",
-                  "x_fp8_t_routed", "x_sc_t_routed",
-                  "gate_fp8_routed", "gate_sc_routed", "up_fp8_routed", "up_sc_routed",
-                  "hidden_fp8_t_routed", "hidden_sc_t_routed"),
-)
-def dispatch_mlp_swiglu_combine_bwd_mxfp8(
+def _dispatch_mlp_glu_combine_bwd_mxfp8_impl(
+    native_op,
     d_y_buffer: torch.Tensor,
     d_y_buffer_ptrs: list[int],
     d_x_routed_buffer: torch.Tensor,
@@ -779,7 +773,7 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     if tuple(tokens_per_expert.shape) != (num_local_experts,):
         raise ValueError("tokens_per_expert must have shape (num_local_experts,)")
 
-    return _C.dispatch_mlp_swiglu_combine_bwd_mxfp8(
+    return native_op(
         d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
         router_weight_buffer, router_weight_buffer_ptrs,
         d_router_weight_buffer, d_router_weight_buffer_ptrs,
@@ -796,11 +790,8 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     )
 
 
-@torch.library.custom_op(
-    "mok::dispatch_mlp_swiglu_combine_bwd_bf16",
-    mutates_args=("d_x_routed_buffer", "d_router_weight_buffer", "x_routed", "gate_routed", "up_routed", "hidden_routed"),
-)
-def dispatch_mlp_swiglu_combine_bwd_bf16(
+def _dispatch_mlp_glu_combine_bwd_bf16_impl(
+    native_op,
     d_y_buffer: torch.Tensor,
     d_y_buffer_ptrs: list[int],
     d_x_routed_buffer: torch.Tensor,
@@ -978,7 +969,7 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     if schedule_peer_rank.device != x.device:
         raise ValueError(f"schedule_peer_rank must be on {x.device}")
 
-    return _C.dispatch_mlp_swiglu_combine_bwd_bf16(
+    return native_op(
         d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
         router_weight_buffer, router_weight_buffer_ptrs,
         d_router_weight_buffer, d_router_weight_buffer_ptrs,
@@ -990,6 +981,150 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
         topk, num_comm_sms, macrobatch_size, minibatch_size,
     )
+
+
+def _register_glu_op(name, native_op, implementation, *, schema, mutates_args):
+    def dispatch(*args):
+        return implementation(native_op, *args)
+
+    dispatch.__name__ = name.rsplit("::", 1)[-1]
+    dispatch.__doc__ = implementation.__doc__
+    return torch.library.custom_op(
+        name,
+        mutates_args=mutates_args,
+        schema=schema,
+    )(dispatch)
+
+
+_FWD_MXFP8_SCHEMA = """(
+    Tensor x, SymInt[] x_ptrs, Tensor(a0!) combine_buffer, SymInt[] combine_buffer_ptrs,
+    Tensor w_shared_gate, Tensor w_routed_gate, Tensor w_routed_gate_sc,
+    Tensor w_shared_up, Tensor w_routed_up, Tensor w_routed_up_sc,
+    Tensor w_shared_down, Tensor w_routed_down, Tensor w_routed_down_sc,
+    Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
+    Tensor num_tokens, Tensor tokens_per_expert,
+    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+      Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
+
+_FWD_BF16_SCHEMA = """(
+    Tensor x, SymInt[] x_ptrs, Tensor(a0!) combine_buffer, SymInt[] combine_buffer_ptrs,
+    Tensor w_shared_gate, Tensor w_routed_gate,
+    Tensor w_shared_up, Tensor w_routed_up,
+    Tensor w_shared_down, Tensor w_routed_down,
+    Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
+    Tensor num_tokens, Tensor tokens_per_expert,
+    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
+
+_BWD_MXFP8_SCHEMA = """(
+    Tensor d_y_buffer, SymInt[] d_y_buffer_ptrs,
+    Tensor(a0!) d_x_routed_buffer, SymInt[] d_x_routed_buffer_ptrs,
+    Tensor router_weight_buffer, SymInt[] router_weight_buffer_ptrs,
+    Tensor(a1!) d_router_weight_buffer, SymInt[] d_router_weight_buffer_ptrs,
+    Tensor w_shared_gate, Tensor w_routed_gate_T, Tensor w_routed_gate_T_sc,
+    Tensor w_shared_up, Tensor w_routed_up_T, Tensor w_routed_up_T_sc,
+    Tensor w_shared_down, Tensor w_routed_down_T, Tensor w_routed_down_T_sc,
+    Tensor(a2!) x_fp8_t_routed, Tensor(a3!) x_sc_t_routed,
+    Tensor gate_shared, Tensor(a4!) gate_fp8_routed, Tensor(a5!) gate_sc_routed,
+    Tensor up_shared, Tensor(a6!) up_fp8_routed, Tensor(a7!) up_sc_routed,
+    Tensor hidden_shared, Tensor(a8!) hidden_fp8_t_routed, Tensor(a9!) hidden_sc_t_routed,
+    Tensor x, SymInt[] x_ptrs,
+    Tensor w_routed_gate, Tensor w_routed_gate_sc,
+    Tensor w_routed_up, Tensor w_routed_up_sc,
+    Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
+    Tensor num_tokens, Tensor tokens_per_expert,
+    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+      Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
+
+_BWD_BF16_SCHEMA = """(
+    Tensor d_y_buffer, SymInt[] d_y_buffer_ptrs,
+    Tensor(a0!) d_x_routed_buffer, SymInt[] d_x_routed_buffer_ptrs,
+    Tensor router_weight_buffer, SymInt[] router_weight_buffer_ptrs,
+    Tensor(a1!) d_router_weight_buffer, SymInt[] d_router_weight_buffer_ptrs,
+    Tensor w_shared_gate, Tensor w_routed_gate,
+    Tensor w_shared_up, Tensor w_routed_up,
+    Tensor w_shared_down, Tensor w_routed_down,
+    Tensor(a2!) x_routed,
+    Tensor gate_shared, Tensor(a3!) gate_routed,
+    Tensor up_shared, Tensor(a4!) up_routed,
+    Tensor hidden_shared, Tensor(a5!) hidden_routed,
+    Tensor x, SymInt[] x_ptrs,
+    Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
+    Tensor num_tokens, Tensor tokens_per_expert,
+    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
+      Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
+
+_FWD_MUTATES_ARGS = ("combine_buffer",)
+_BWD_MXFP8_MUTATES_ARGS = (
+    "d_x_routed_buffer", "d_router_weight_buffer",
+    "x_fp8_t_routed", "x_sc_t_routed",
+    "gate_fp8_routed", "gate_sc_routed", "up_fp8_routed", "up_sc_routed",
+    "hidden_fp8_t_routed", "hidden_sc_t_routed",
+)
+_BWD_BF16_MUTATES_ARGS = (
+    "d_x_routed_buffer", "d_router_weight_buffer",
+    "x_routed", "gate_routed", "up_routed", "hidden_routed",
+)
+
+dispatch_mlp_swiglu_combine_fwd_mxfp8 = _register_glu_op(
+    "mok::dispatch_mlp_swiglu_combine_fwd_mxfp8",
+    _C.dispatch_mlp_swiglu_combine_fwd_mxfp8,
+    _dispatch_mlp_glu_combine_fwd_mxfp8_impl,
+    schema=_FWD_MXFP8_SCHEMA,
+    mutates_args=_FWD_MUTATES_ARGS,
+)
+dispatch_mlp_situglu_combine_fwd_mxfp8 = _register_glu_op(
+    "mok::dispatch_mlp_situglu_combine_fwd_mxfp8",
+    _C.dispatch_mlp_situglu_combine_fwd_mxfp8,
+    _dispatch_mlp_glu_combine_fwd_mxfp8_impl,
+    schema=_FWD_MXFP8_SCHEMA,
+    mutates_args=_FWD_MUTATES_ARGS,
+)
+dispatch_mlp_swiglu_combine_fwd_bf16 = _register_glu_op(
+    "mok::dispatch_mlp_swiglu_combine_fwd_bf16",
+    _C.dispatch_mlp_swiglu_combine_fwd_bf16,
+    _dispatch_mlp_glu_combine_fwd_bf16_impl,
+    schema=_FWD_BF16_SCHEMA,
+    mutates_args=_FWD_MUTATES_ARGS,
+)
+dispatch_mlp_situglu_combine_fwd_bf16 = _register_glu_op(
+    "mok::dispatch_mlp_situglu_combine_fwd_bf16",
+    _C.dispatch_mlp_situglu_combine_fwd_bf16,
+    _dispatch_mlp_glu_combine_fwd_bf16_impl,
+    schema=_FWD_BF16_SCHEMA,
+    mutates_args=_FWD_MUTATES_ARGS,
+)
+dispatch_mlp_swiglu_combine_bwd_mxfp8 = _register_glu_op(
+    "mok::dispatch_mlp_swiglu_combine_bwd_mxfp8",
+    _C.dispatch_mlp_swiglu_combine_bwd_mxfp8,
+    _dispatch_mlp_glu_combine_bwd_mxfp8_impl,
+    schema=_BWD_MXFP8_SCHEMA,
+    mutates_args=_BWD_MXFP8_MUTATES_ARGS,
+)
+dispatch_mlp_situglu_combine_bwd_mxfp8 = _register_glu_op(
+    "mok::dispatch_mlp_situglu_combine_bwd_mxfp8",
+    _C.dispatch_mlp_situglu_combine_bwd_mxfp8,
+    _dispatch_mlp_glu_combine_bwd_mxfp8_impl,
+    schema=_BWD_MXFP8_SCHEMA,
+    mutates_args=_BWD_MXFP8_MUTATES_ARGS,
+)
+dispatch_mlp_swiglu_combine_bwd_bf16 = _register_glu_op(
+    "mok::dispatch_mlp_swiglu_combine_bwd_bf16",
+    _C.dispatch_mlp_swiglu_combine_bwd_bf16,
+    _dispatch_mlp_glu_combine_bwd_bf16_impl,
+    schema=_BWD_BF16_SCHEMA,
+    mutates_args=_BWD_BF16_MUTATES_ARGS,
+)
+dispatch_mlp_situglu_combine_bwd_bf16 = _register_glu_op(
+    "mok::dispatch_mlp_situglu_combine_bwd_bf16",
+    _C.dispatch_mlp_situglu_combine_bwd_bf16,
+    _dispatch_mlp_glu_combine_bwd_bf16_impl,
+    schema=_BWD_BF16_SCHEMA,
+    mutates_args=_BWD_BF16_MUTATES_ARGS,
+)
 
 
 @torch.library.custom_op("mok::fwd_epilogue", mutates_args=())

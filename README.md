@@ -99,6 +99,15 @@ MoK exposes 5 hyperparameters that can affect the performance of MoE execution. 
 
 You can set these values when creating the `MoKConfig` dataclass, which you pass to all functional-layer functions.
 
+The `activation` field selects the GLU operation. It defaults to `"swiglu"`, preserving the existing behavior. Set it to `"situglu"` to use the bounded SiTU-GLU operation from the [Kimi K3 technical report](https://arxiv.org/abs/2607.24653):
+
+$$
+h = \left[4\tanh\left(\frac{g}{4}\right)\sigma(g)\right]
+    \left[25\tanh\left(\frac{u}{25}\right)\right].
+$$
+
+SiTU-GLU is compiled as a separate operation for both BF16 and MXFP8 forward and backward passes; it does not replace the existing SwiGLU operations.
+
 ### Workspace
 
 MoK relies on PyTorch symmetric memory to allocate and manage inter-GPU symmetric buffers, or identically sized memory allocations across many GPUs (i.e., all GPUs in an EP group). These buffers serve as the source/destination of token dispatch/combine, along with a few other purposes. We call the entire collection of symmetric memory, along with the other metadata and scratchpads MoK needs, the **workspace**. We provide a data structure and functions for creating and destroying workspaces.

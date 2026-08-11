@@ -1019,7 +1019,7 @@ _FWD_MXFP8_SCHEMA = """(
     Tensor w_shared_down, Tensor w_routed_down, Tensor w_routed_down_sc,
     Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
     Tensor num_tokens, Tensor tokens_per_expert,
-    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+    SymInt topk, float? swiglu_limit, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
 ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
       Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
 
@@ -1030,7 +1030,7 @@ _FWD_BF16_SCHEMA = """(
     Tensor w_shared_down, Tensor w_routed_down,
     Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
     Tensor num_tokens, Tensor tokens_per_expert,
-    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+    SymInt topk, float? swiglu_limit, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
 ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
 
 _BWD_MXFP8_SCHEMA = """(
@@ -1050,7 +1050,7 @@ _BWD_MXFP8_SCHEMA = """(
     Tensor w_routed_up, Tensor w_routed_up_sc,
     Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
     Tensor num_tokens, Tensor tokens_per_expert,
-    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+    SymInt topk, float? swiglu_limit, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
 ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
       Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
 
@@ -1069,7 +1069,7 @@ _BWD_BF16_SCHEMA = """(
     Tensor x, SymInt[] x_ptrs,
     Tensor schedule_peer_rank, Tensor schedule_peer_token_idx,
     Tensor num_tokens, Tensor tokens_per_expert,
-    SymInt topk, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
+    SymInt topk, float? swiglu_limit, SymInt num_comm_sms, SymInt macrobatch_size, SymInt minibatch_size
 ) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor,
       Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"""
 

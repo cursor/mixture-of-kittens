@@ -24,8 +24,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("w_shared_down"), pybind11::arg("w_routed_down"), pybind11::arg("w_routed_down_sc"),
           pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
           pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
-          pybind11::arg("topk"), pybind11::arg("num_comm_sms"),
-          pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
+          pybind11::arg("topk"), pybind11::arg("swiglu_limit"),
+          pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_fwd_mxfp8("dispatch_mlp_swiglu_combine_fwd_mxfp8",
                        &dispatch_mlp_glu_combine_fwd_mxfp8<GluActivation::SWIGLU>);
@@ -50,8 +50,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("w_routed_up"), pybind11::arg("w_routed_up_sc"),
           pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
           pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
-          pybind11::arg("topk"), pybind11::arg("num_comm_sms"),
-          pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
+          pybind11::arg("topk"), pybind11::arg("swiglu_limit"),
+          pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_bwd_mxfp8("dispatch_mlp_swiglu_combine_bwd_mxfp8",
                        &dispatch_mlp_glu_combine_bwd_mxfp8<GluActivation::SWIGLU>);
@@ -67,8 +67,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("w_shared_down"), pybind11::arg("w_routed_down"),
           pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
           pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
-          pybind11::arg("topk"), pybind11::arg("num_comm_sms"),
-          pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
+          pybind11::arg("topk"), pybind11::arg("swiglu_limit"),
+          pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_fwd_bf16("dispatch_mlp_swiglu_combine_fwd_bf16",
                       &dispatch_mlp_glu_combine_fwd_bf16<GluActivation::SWIGLU>);
@@ -91,8 +91,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("x"), pybind11::arg("x_ptrs"),
           pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
           pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
-          pybind11::arg("topk"), pybind11::arg("num_comm_sms"),
-          pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
+          pybind11::arg("topk"), pybind11::arg("swiglu_limit"),
+          pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_bwd_bf16("dispatch_mlp_swiglu_combine_bwd_bf16",
                       &dispatch_mlp_glu_combine_bwd_bf16<GluActivation::SWIGLU>);

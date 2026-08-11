@@ -14,6 +14,7 @@ from .utils import (
     generate_inputs,
     generate_topk_experts,
     mok_params,
+    swiglu_params,
     run_all_gather_top_experts_reference,
     run_forward_reference_bf16,
     run_fwd_epilogue_reference,
@@ -234,9 +235,10 @@ def test_build_schedule(context: tuple[int, int, torch.device]) -> None:
 
 def test_forward_mxfp8(context: tuple[int, int, torch.device]) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -298,6 +300,7 @@ def test_forward_mxfp8(context: tuple[int, int, torch.device]) -> None:
             (w_routed_gate_fp8, w_routed_gate_sc),
             (w_routed_up_fp8, w_routed_up_sc),
             (w_routed_down_fp8, w_routed_down_sc),
+            swiglu_limit,
         )
         (
             reference_combine_buffer,
@@ -314,6 +317,7 @@ def test_forward_mxfp8(context: tuple[int, int, torch.device]) -> None:
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
         reference = (
             run_fwd_epilogue_reference(
@@ -335,7 +339,7 @@ def test_forward_mxfp8(context: tuple[int, int, torch.device]) -> None:
             FORWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 MXFP8_TOLERANCE,
@@ -491,9 +495,10 @@ def test_forward_mxfp8(context: tuple[int, int, torch.device]) -> None:
 
 def test_forward_bf16(context: tuple[int, int, torch.device]) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -552,6 +557,7 @@ def test_forward_bf16(context: tuple[int, int, torch.device]) -> None:
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
         (
             reference_combine_buffer,
@@ -568,6 +574,7 @@ def test_forward_bf16(context: tuple[int, int, torch.device]) -> None:
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
         reference = (
             run_fwd_epilogue_reference(
@@ -589,7 +596,7 @@ def test_forward_bf16(context: tuple[int, int, torch.device]) -> None:
             FORWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 BF16_TOLERANCE,
@@ -742,9 +749,10 @@ def test_forward_bf16(context: tuple[int, int, torch.device]) -> None:
 
 def test_backward_mxfp8(context: tuple[int, int, torch.device]) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -820,6 +828,7 @@ def test_backward_mxfp8(context: tuple[int, int, torch.device]) -> None:
             (w_routed_gate_fp8, w_routed_gate_sc),
             (w_routed_up_fp8, w_routed_up_sc),
             (w_routed_down_fp8, w_routed_down_sc),
+            swiglu_limit,
         )
 
         actual = functional.backward(
@@ -849,13 +858,14 @@ def test_backward_mxfp8(context: tuple[int, int, torch.device]) -> None:
                 w_routed_down_t_fp8,
                 w_routed_down_t_sc,
             ),
+            swiglu_limit,
         )
-        reference = run_reference_bf16(*inputs)[1:]
+        reference = run_reference_bf16(*inputs, swiglu_limit)[1:]
         for name, expected, result in zip(
             BACKWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 MXFP8_TOLERANCE,
@@ -1027,9 +1037,10 @@ def test_backward_mxfp8(context: tuple[int, int, torch.device]) -> None:
 
 def test_backward_bf16(context: tuple[int, int, torch.device]) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -1087,6 +1098,7 @@ def test_backward_bf16(context: tuple[int, int, torch.device]) -> None:
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
 
         actual = functional.backward(
@@ -1103,13 +1115,14 @@ def test_backward_bf16(context: tuple[int, int, torch.device]) -> None:
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
-        reference = run_reference_bf16(*inputs)[1:]
+        reference = run_reference_bf16(*inputs, swiglu_limit)[1:]
         for name, expected, result in zip(
             BACKWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 BF16_TOLERANCE,

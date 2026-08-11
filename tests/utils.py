@@ -15,9 +15,14 @@ def situglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
     return gate_factor * up_factor
 
 
-def apply_glu(gate: torch.Tensor, up: torch.Tensor, activation: str) -> torch.Tensor:
+def apply_glu(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    activation: str,
+    swiglu_limit: float | None = None,
+) -> torch.Tensor:
     if activation == "swiglu":
-        return torch.nn.functional.silu(gate) * up
+        return run_swiglu_reference(gate, up, swiglu_limit)
     if activation == "situglu":
         return situglu(gate, up)
     raise ValueError("activation must be 'swiglu' or 'situglu'")
@@ -49,6 +54,13 @@ def mok_params() -> tuple[tuple[str, int, int, int, int], ...]:
         ("Minimum macrobatch", 40, 28, 4096, 4096),
         ("2x macrobatch", 40, 28, 4096, 8192),
         ("4x macrobatch", 40, 28, 4096, 16384)
+    )
+
+
+def swiglu_params() -> tuple[tuple[str, float | None], ...]:
+    return (
+        ("Unclamped SwiGLU", None),
+        ("Clamped SwiGLU", 4.0),
     )
 
 
@@ -229,6 +241,20 @@ def run_mxfp8_quantize_reference(
     return x_fp8, x_sc, x_fp8_t, x_sc_t
 
 
+def run_swiglu_reference(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    swiglu_limit: float | None = None,
+) -> torch.Tensor:
+    if swiglu_limit is None:
+        return torch.nn.functional.silu(gate) * up
+    else:
+        dtype = gate.dtype
+        gate_fp32 = gate.float().clamp(max=swiglu_limit)
+        up_fp32 = up.float().clamp(min=-swiglu_limit, max=swiglu_limit)
+        return (torch.nn.functional.silu(gate_fp32) * up_fp32).to(dtype)
+
+
 def run_forward_reference_bf16(
     x: torch.Tensor,              # [T, H]
     topk_experts: torch.Tensor,   # [T, TOPK]
@@ -238,6 +264,7 @@ def run_forward_reference_bf16(
     w_routed_gate: torch.Tensor,  # [E, I, H]
     w_routed_up: torch.Tensor,    # [E, I, H]
     w_routed_down: torch.Tensor,  # [E, H, I]
+    swiglu_limit: float | None = None,
     *,
     activation: str = "swiglu",
 ) -> tuple[
@@ -275,7 +302,7 @@ def run_forward_reference_bf16(
         expert_x = recv_x[rows]
         gate = expert_x @ w_routed_gate[expert_idx].T
         up = expert_x @ w_routed_up[expert_idx].T
-        hidden_activations = apply_glu(gate, up, activation)
+        hidden_activations = apply_glu(gate, up, activation, swiglu_limit)
         recv_output = recv_output.index_copy(
             0, rows, hidden_activations @ w_routed_down[expert_idx].T)
 
@@ -285,7 +312,7 @@ def run_forward_reference_bf16(
 
     gate_shared = x @ w_shared_gate.T
     up_shared = x @ w_shared_up.T
-    hidden_shared = apply_glu(gate_shared, up_shared, activation)
+    hidden_shared = apply_glu(gate_shared, up_shared, activation, swiglu_limit)
     y_shared = hidden_shared @ w_shared_down.T
 
     return combine_buffer, gate_shared, up_shared, hidden_shared, y_shared
@@ -323,6 +350,7 @@ def run_reference_bf16(
     w_routed_up: torch.Tensor,     # [E, I, H]
     w_routed_down: torch.Tensor,   # [E, H, I]
     d_output: torch.Tensor,        # [T, H]
+    swiglu_limit: float | None = None,
     *,
     activation: str = "swiglu",
 ) -> tuple[
@@ -369,7 +397,7 @@ def run_reference_bf16(
         expert_x = recv_x[rows]
         gate = expert_x @ w_routed_gate[expert_idx].T
         up = expert_x @ w_routed_up[expert_idx].T
-        hidden_activations = apply_glu(gate, up, activation)
+        hidden_activations = apply_glu(gate, up, activation, swiglu_limit)
         recv_output = recv_output.index_copy(0, rows, hidden_activations @ w_routed_down[expert_idx].T)
 
     # Routed token weighted sum
@@ -385,7 +413,7 @@ def run_reference_bf16(
     w_shared_down = w_shared_down.detach().requires_grad_()
     gate_shared = x_shared @ w_shared_gate.T
     up_shared = x_shared @ w_shared_up.T
-    shared_output = apply_glu(gate_shared, up_shared, activation) @ w_shared_down.T
+    shared_output = apply_glu(gate_shared, up_shared, activation, swiglu_limit) @ w_shared_down.T
 
     # Final sum
     output = (routed_output + shared_output.float()).to(torch.bfloat16)

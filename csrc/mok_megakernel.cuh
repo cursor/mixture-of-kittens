@@ -194,6 +194,7 @@ struct globals_fwd {
     index_gl y_routed_done;                   // (num Down CTA output tiles,) combine -> next routed down
 
     const int topk;
+    const float swiglu_limit;
     const int num_comm_sms;
     const int macrobatch_size;
     const int minibatch_size;
@@ -310,6 +311,7 @@ struct globals_bwd {
     index_gl routed_buffers_done;                         // (num_macrobatches,) current macrobatch -> next macrobatch
 
     const int topk;
+    const float swiglu_limit;
     const int num_comm_sms;
     const int macrobatch_size;
     const int minibatch_size;
@@ -652,7 +654,44 @@ static __device__ __forceinline__ void combine_kernel(
     }
 }
 
-template <bool IS_SHARED>
+template <bool IS_CLAMPED>
+static __device__ __forceinline__ float2 swiglu_bwd_pair(
+    float2 gate,
+    float2 up,
+    const float2 d_hidden,
+    const float limit,
+    bf16_2 &d_gate,
+    bf16_2 &d_up
+) {
+    uint32_t clamp_grad_mask;
+    if constexpr (IS_CLAMPED) {
+        clamp_grad_mask = static_cast<uint32_t>(gate.x <= limit)
+                          | static_cast<uint32_t>(gate.y <= limit) << 1
+                          | static_cast<uint32_t>(up.x >= -limit && up.x <= limit) << 2
+                          | static_cast<uint32_t>(up.y >= -limit && up.y <= limit) << 3;
+        gate = {fminf(gate.x, limit), fminf(gate.y, limit)};
+        up = {fminf(fmaxf(up.x, -limit), limit), fminf(fmaxf(up.y, -limit), limit)};
+    }
+    const float2 sigmoid = {1.0f / (1.0f + __expf(-gate.x)), 1.0f / (1.0f + __expf(-gate.y))};
+    const float2 silu = {gate.x * sigmoid.x, gate.y * sigmoid.y};
+    const float2 dsilu = {(1.0f - silu.x) * sigmoid.x + silu.x, (1.0f - silu.y) * sigmoid.y + silu.y};
+    if constexpr (IS_CLAMPED) {
+        d_gate = __floats2bfloat162_rn(
+            clamp_grad_mask & 1 ? dsilu.x * up.x * d_hidden.x : 0.0f,
+            clamp_grad_mask & 2 ? dsilu.y * up.y * d_hidden.y : 0.0f
+        );
+        d_up = __floats2bfloat162_rn(
+            clamp_grad_mask & 4 ? silu.x * d_hidden.x : 0.0f,
+            clamp_grad_mask & 8 ? silu.y * d_hidden.y : 0.0f
+        );
+    } else {
+        d_gate = __floats2bfloat162_rn(dsilu.x * up.x * d_hidden.x, dsilu.y * up.y * d_hidden.y);
+        d_up = __floats2bfloat162_rn(silu.x * d_hidden.x, silu.y * d_hidden.y);
+    }
+    return {silu.x * up.x, silu.y * up.y};
+}
+
+template <bool IS_SHARED, bool IS_CLAMPED>
 static __device__ __forceinline__ void swiglu_fwd_kernel(
     const epi_bf16_gl &gate_gmem,
     const epi_bf16_gl &up_gmem,
@@ -665,6 +704,7 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
     semaphore (&swiglu_inputs_arrived)[config::SWIGLU_FWD_PIPE_DEPTH],
     uint32_t &swiglu_bitfield,
     const int num_tokens,
+    const float swiglu_limit,
     const int macrobatch_size,
     const int minibatch_size,
     const int macrobatch_idx,
@@ -763,6 +803,11 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
                     rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
                     compute_group::load(gate, gate_smem[stage]);
                     compute_group::load(up, up_smem[stage]);
+                    if constexpr (IS_CLAMPED) {
+                        compute_group::min(gate, gate, swiglu_limit);
+                        compute_group::max(up, up, -swiglu_limit);
+                        compute_group::min(up, up, swiglu_limit);
+                    }
                     compute_group::mul(denominator, gate, -1.0f);
                     compute_group::exp(denominator, denominator);
                     compute_group::add(denominator, denominator, 1.0f);
@@ -779,10 +824,14 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
                 #pragma unroll
                 for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
                     float2 gate = __bfloat1622float2(gate_pairs[i]);
-                    const float2 up = __bfloat1622float2(up_pairs[i]);
+                    float2 up = __bfloat1622float2(up_pairs[i]);
                     if constexpr (USE_SITUGLU) {
                         gate = float2{situglu_forward(gate.x, up.x), situglu_forward(gate.y, up.y)};
                     } else {
+                        if constexpr (IS_CLAMPED) {
+                            gate = {fminf(gate.x, swiglu_limit), fminf(gate.y, swiglu_limit)};
+                            up = {fminf(fmaxf(up.x, -swiglu_limit), swiglu_limit), fminf(fmaxf(up.y, -swiglu_limit), swiglu_limit)};
+                        }
                         float2 denominator = base_ops::mul::op<float2>(gate, float2{-1.0f, -1.0f});
                         denominator = base_ops::exp::op<float2>(denominator);
                         denominator = base_ops::sum::op<float2>(denominator, float2{1.0f, 1.0f});
@@ -833,7 +882,7 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
     }
 }
 
-template <bool IS_SHARED>
+template <bool IS_SHARED, bool IS_CLAMPED>
 static __device__ __forceinline__ void swiglu_bwd_kernel(
     const epi_bf16_gl &d_hidden_gmem,
     const std::conditional_t<IS_SHARED, swiglu_bf16_gl, routed_gate_up_gl> &gate_gmem,
@@ -858,6 +907,7 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
     semaphore (&swiglu_inputs_arrived)[config::SWIGLU_BWD_PIPE_DEPTH],
     uint32_t &swiglu_bitfield,
     const int num_tokens,
+    const float swiglu_limit,
     const int macrobatch_size,
     const int minibatch_size,
     const int macrobatch_idx,
@@ -1027,20 +1077,9 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                                 terms_x.d_up * d_hidden_x,
                                 terms_y.d_up * d_hidden_y});
                         } else {
-                            const float sigmoid_x = 1.0f / (1.0f + __expf(-gate_fp32[k].x));
-                            const float sigmoid_y = 1.0f / (1.0f + __expf(-gate_fp32[k].y));
-                            const float silu_x = gate_fp32[k].x * sigmoid_x;
-                            const float silu_y = gate_fp32[k].y * sigmoid_y;
-                            const float dsilu_x = (1.0f - silu_x) * sigmoid_x + silu_x;
-                            const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
-                            router_grad_partial += d_hidden_x * inv_router_weight * silu_x * up_fp32[k].x
-                                                 + d_hidden_y * inv_router_weight * silu_y * up_fp32[k].y;
-                            d_gate_bf16[k] = __float22bfloat162_rn(float2{
-                                dsilu_x * up_fp32[k].x * d_hidden_x,
-                                dsilu_y * up_fp32[k].y * d_hidden_y});
-                            d_up_bf16[k] = __float22bfloat162_rn(float2{
-                                silu_x * d_hidden_x,
-                                silu_y * d_hidden_y});
+                            const float2 hidden = swiglu_bwd_pair<IS_CLAMPED>(gate_fp32[k], up_fp32[k], d_hidden_fp32[k], swiglu_limit, d_gate_bf16[k], d_up_bf16[k]);
+                            router_grad_partial += d_hidden_x * inv_router_weight * hidden.x
+                                                 + d_hidden_y * inv_router_weight * hidden.y;
                         }
                     }
 
@@ -1118,6 +1157,26 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                             terms_x.d_up * d_hidden.x,
                             terms_y.d_up * d_hidden.y);
                     }
+                } else if constexpr (IS_CLAMPED) {
+                    rt_bf<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, d_hidden;
+                    compute_group::load(gate, gate_smem[stage]);
+                    compute_group::load(up, up_smem[stage]);
+                    compute_group::load(d_hidden, d_hidden_smem[stage]);
+                    #pragma unroll
+                    for (int i = 0; i < gate.height; ++i) {
+                        #pragma unroll
+                        for (int j = 0; j < gate.width; ++j) {
+                            #pragma unroll
+                            for (int k = 0; k < gate.packed_per_tile; ++k) {
+                                const float2 gate_fp32 = __bfloat1622float2(gate.tiles[i][j].data[k]);
+                                const float2 up_fp32 = __bfloat1622float2(up.tiles[i][j].data[k]);
+                                const float2 d_hidden_fp32 = __bfloat1622float2(d_hidden.tiles[i][j].data[k]);
+                                swiglu_bwd_pair<IS_CLAMPED>(gate_fp32, up_fp32, d_hidden_fp32, swiglu_limit, gate.tiles[i][j].data[k], up.tiles[i][j].data[k]);
+                            }
+                        }
+                    }
+                    compute_group::store(gate_smem[stage], gate);
+                    compute_group::store(up_smem[stage], up);
                 } else {
                     rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, d_hidden;
                     compute_group::load(gate, gate_smem[stage]);
@@ -1183,20 +1242,9 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                                 terms_x.d_up * d_hidden.x,
                                 terms_y.d_up * d_hidden.y);
                         } else {
-                            const float sigmoid_x = 1.0f / (1.0f + __expf(-gate.x));
-                            const float sigmoid_y = 1.0f / (1.0f + __expf(-gate.y));
-                            const float silu_x = gate.x * sigmoid_x;
-                            const float silu_y = gate.y * sigmoid_y;
-                            const float dsilu_x = (1.0f - silu_x) * sigmoid_x + silu_x;
-                            const float dsilu_y = (1.0f - silu_y) * sigmoid_y + silu_y;
-                            router_grad_partial += d_hidden.x * inv_router_weight * silu_x * up.x
-                                                 + d_hidden.y * inv_router_weight * silu_y * up.y;
-                            d_gate_pairs[j] = __floats2bfloat162_rn(
-                                dsilu_x * up.x * d_hidden.x,
-                                dsilu_y * up.y * d_hidden.y);
-                            d_up_pairs[j] = __floats2bfloat162_rn(
-                                silu_x * d_hidden.x,
-                                silu_y * d_hidden.y);
+                            const float2 hidden = swiglu_bwd_pair<IS_CLAMPED>(gate, up, d_hidden, swiglu_limit, d_gate_pairs[j], d_up_pairs[j]);
+                            router_grad_partial += d_hidden.x * inv_router_weight * hidden.x
+                                                 + d_hidden.y * inv_router_weight * hidden.y;
                         }
                     }
                     const auto *d_gate_words = reinterpret_cast<const uint32_t *>(d_gate_pairs);
@@ -1623,6 +1671,7 @@ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
     }
 }
 
+template <bool IS_CLAMPED>
 static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(const globals_fwd &g) {
     int cluster_idx = clusterIdx().x;
     const int cta_rank = cluster_ctarank();
@@ -1803,10 +1852,11 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
         } else if (compute_cluster_idx < shared_gate_up_tasks * 2 + shared_swiglu_tasks) {
             // Shared Swiglu (BF16)
             const int task_idx = compute_cluster_idx - shared_gate_up_tasks * 2;
-            swiglu_fwd_kernel<true>(g.gate_shared, g.up_shared, g.hidden_shared, nullptr, nullptr, nullptr,
+            swiglu_fwd_kernel<true, IS_CLAMPED>(g.gate_shared, g.up_shared, g.hidden_shared, nullptr, nullptr, nullptr,
                              g.gate_up_tile_ready, g.hidden_row_block_ready,
                              swiglu_inputs_arrived, swiglu_bitfield,
-                             g.x_shared.rows(), macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank, 0, 0, smem_base_addr);
+                             g.x_shared.rows(), g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                             0, 0, task_idx, cta_rank, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_tasks) {
             // Shared down (BF16)
             const int task_idx = compute_cluster_idx - shared_gate_up_tasks * 2 - shared_swiglu_tasks;
@@ -1854,11 +1904,12 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
             } else if (minibatch_task_idx < minibatch_routed_gate_up_tasks * 2 + minibatch_routed_swiglu_tasks) {
                 // Routed Swiglu
                 const int task_idx = minibatch_task_idx - minibatch_routed_gate_up_tasks * 2;
-                swiglu_fwd_kernel<false>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
+                swiglu_fwd_kernel<false, IS_CLAMPED>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
                                   &g.hidden_sc_routed, &g.hidden_fp8_t_routed, &g.hidden_sc_t_routed,
                                   g.gate_up_tile_ready, g.hidden_row_block_ready,
                                   swiglu_inputs_arrived, swiglu_bitfield,
-                                  num_tokens, macrobatch_size, g.minibatch_size, macrobatch_idx, minibatch_idx, task_idx, cta_rank,
+                                  num_tokens, g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                                  macrobatch_idx, minibatch_idx, task_idx, cta_rank,
                                   shared_gate_up_tasks, shared_row_blocks, smem_base_addr);
             } else {
                 // Routed down
@@ -1941,6 +1992,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
 
     // Metadata
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -2030,12 +2082,16 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
         .y_routed_ready = kittens::py::tensor_to_gl<index_gl>(y_routed_ready),
         .y_routed_done = kittens::py::tensor_to_gl<index_gl>(y_routed_done),
         .topk = topk,
+        .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
         .minibatch_size = minibatch_size
     };
 
-    kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel>(g);
+    if (swiglu_limit.has_value())
+        kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<true>>(g);
+    else
+        kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<false>>(g);
 
     return {x_fp8_t_routed, x_sc_t_routed,
             gate_shared, gate_fp8_routed, gate_sc_routed,
@@ -2062,6 +2118,7 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
     const at::Tensor &num_tokens,
     const at::Tensor &tokens_per_expert,
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -2142,15 +2199,20 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
         .y_routed_ready = kittens::py::tensor_to_gl<index_gl>(y_routed_ready),
         .y_routed_done = kittens::py::tensor_to_gl<index_gl>(y_routed_done),
         .topk = topk,
+        .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
         .minibatch_size = minibatch_size
     };
 
-    kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel>(g);
+    if (swiglu_limit.has_value())
+        kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<true>>(g);
+    else
+        kittens::py::launch_kernel<config, globals_fwd, dispatch_mlp_swiglu_combine_fwd_kernel<false>>(g);
     return {x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, y_shared, y_routed};
 }
 
+template <bool IS_CLAMPED>
 static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(const globals_bwd &g) {
     const int num_local_experts = g.w_routed_gate.depth();
     const int intermediate_dim_col_blocks = g.hidden_shared.cols() / config::MLP_Nb;
@@ -2387,12 +2449,13 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks) {
             // Shared Swiglu bwd: d_gate_shared, d_up_shared = swiglu_bwd(d_hidden_shared, gate_shared, up_shared)
             const int task_idx = compute_cluster_idx - shared_dgrad_down_tasks;
-            swiglu_bwd_kernel<true>(g.d_hidden_shared, g.gate_shared, g.up_shared, g.d_gate_shared, g.d_up_shared,
+            swiglu_bwd_kernel<true, IS_CLAMPED>(g.d_hidden_shared, g.gate_shared, g.up_shared, g.d_gate_shared, g.d_up_shared,
                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                              nullptr, nullptr, nullptr,
                              g.d_hidden_ready, nullptr, g.d_gate_up_ready, nullptr,
                              swiglu_bwd_inputs_arrived, swiglu_bwd_bitfield,
-                             g.gate_shared.rows(), macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                             g.gate_shared.rows(), g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                             0, 0, task_idx, cta_rank,
                              0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks + shared_dgrad_gate_up_tasks) {
             // Shared dgrad gate+up: d_x_shared = d_gate_shared @ w_shared_gate + d_up_shared @ w_shared_up
@@ -2470,11 +2533,12 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                 } else {
                     // Replay Swiglu refreshes the routed hidden activation.
                     const int task_idx = minibatch_task_idx - minibatch_routed_gate_up_tasks * 2;
-                    swiglu_fwd_kernel<false>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
+                    swiglu_fwd_kernel<false, IS_CLAMPED>(g.gate_routed, g.up_routed, g.hidden_fp8_routed,
                                       &g.hidden_sc_routed, &g.hidden_fp8_t_routed, &g.hidden_sc_t_routed,
                                       g.replayed_gate_up_ready, g.replayed_hidden_ready,
                                       swiglu_fwd_inputs_arrived, swiglu_fwd_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, macrobatch_idx, minibatch_idx,
+                                      num_tokens, g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                                      macrobatch_idx, minibatch_idx,
                                       task_idx, cta_rank, 0, 0, smem_base_addr);
                 }
             } else {
@@ -2496,13 +2560,14 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                            minibatch_task_idx < minibatch_routed_dgrad_down_tasks + minibatch_routed_swiglu_bwd_tasks) {
                     // Routed Swiglu backward
                     const int task_idx = minibatch_task_idx - minibatch_routed_dgrad_down_tasks;
-                    swiglu_bwd_kernel<false>(g.d_hidden_routed, g.gate_fp8_routed, g.up_fp8_routed, g.d_gate_fp8_routed, g.d_up_fp8_routed,
+                    swiglu_bwd_kernel<false, IS_CLAMPED>(g.d_hidden_routed, g.gate_fp8_routed, g.up_fp8_routed, g.d_gate_fp8_routed, g.d_up_fp8_routed,
                                       &g.gate_sc_routed, &g.up_sc_routed, &g.d_gate_sc_routed, &g.d_up_sc_routed,
                                       &g.d_gate_fp8_t_routed, &g.d_gate_sc_t_routed, &g.d_up_fp8_t_routed, &g.d_up_sc_t_routed,
                                       &g.router_weights, &g.d_router_weight_partials, &g.schedule_peer_rank,
                                       g.d_hidden_ready, replayed ? &g.replayed_gate_up_ready : nullptr, g.d_gate_up_ready, buffer_done,
                                       swiglu_bwd_inputs_arrived, swiglu_bwd_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, macrobatch_idx, minibatch_idx,
+                                      num_tokens, g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                                      macrobatch_idx, minibatch_idx,
                                       task_idx, cta_rank, shared_dgrad_down_tasks, 0, shared_row_blocks, macrobatch_idx, smem_base_addr);
                 } else if (routed_task_idx < num_routed_tasks) {
                     // Dgrad gate+up: d_x_routed = d_gate @ w_routed_gate + d_up @ w_routed_up
@@ -2645,6 +2710,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
 
     // Metadata
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -2798,12 +2864,16 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
         .replayed_hidden_ready = kittens::py::tensor_to_gl<index_gl>(replayed_hidden_ready),
         .routed_buffers_done = kittens::py::tensor_to_gl<index_gl>(routed_buffers_done),
         .topk = topk,
+        .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
         .minibatch_size = minibatch_size
     };
 
-    kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel>(g);
+    if (swiglu_limit.has_value())
+        kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<true>>(g);
+    else
+        kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<false>>(g);
     const int64_t elements_per_expert = d_w_routed_gate.numel() / num_local_experts;
     utils::zero_empty_routed_wgrads<<<dim3(128, num_local_experts), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<uint16_t *>(d_w_routed_gate.data_ptr<at::BFloat16>()),
@@ -2851,6 +2921,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     const at::Tensor &num_tokens,
     const at::Tensor &tokens_per_expert,
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -2986,12 +3057,16 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
         .replayed_hidden_ready = kittens::py::tensor_to_gl<index_gl>(replayed_hidden_ready),
         .routed_buffers_done = kittens::py::tensor_to_gl<index_gl>(routed_buffers_done),
         .topk = topk,
+        .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,
         .macrobatch_size = macrobatch_size,
         .minibatch_size = minibatch_size
     };
 
-    kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel>(g);
+    if (swiglu_limit.has_value())
+        kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<true>>(g);
+    else
+        kittens::py::launch_kernel<config, globals_bwd, dispatch_mlp_swiglu_combine_bwd_kernel<false>>(g);
     const int64_t elements_per_expert = d_w_routed_gate.numel() / num_local_experts;
     utils::zero_empty_routed_wgrads<<<dim3(128, num_local_experts), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
         reinterpret_cast<uint16_t *>(d_w_routed_gate.data_ptr<at::BFloat16>()),
@@ -3036,6 +3111,7 @@ dispatch_mlp_glu_combine_fwd_mxfp8(
 
     // Metadata
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -3050,7 +3126,7 @@ dispatch_mlp_glu_combine_fwd_mxfp8(
                 w_shared_up, w_routed_up, w_routed_up_sc,
                 w_shared_down, w_routed_down, w_routed_down_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
@@ -3058,7 +3134,7 @@ dispatch_mlp_glu_combine_fwd_mxfp8(
                 w_shared_up, w_routed_up, w_routed_up_sc,
                 w_shared_down, w_routed_down, w_routed_down_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
@@ -3066,7 +3142,7 @@ dispatch_mlp_glu_combine_fwd_mxfp8(
                 w_shared_up, w_routed_up, w_routed_up_sc,
                 w_shared_down, w_routed_down, w_routed_down_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
@@ -3074,7 +3150,7 @@ dispatch_mlp_glu_combine_fwd_mxfp8(
                 w_shared_up, w_routed_up, w_routed_up_sc,
                 w_shared_down, w_routed_down, w_routed_down_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
@@ -3082,7 +3158,7 @@ dispatch_mlp_glu_combine_fwd_mxfp8(
                 w_shared_up, w_routed_up, w_routed_up_sc,
                 w_shared_down, w_routed_down, w_routed_down_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         default:
             throw std::runtime_error("MoK: dispatch_mlp_swiglu_combine_fwd_mxfp8 unsupported num_devices=" +
                                      std::to_string(num_devices) + " (supported: 4, 8, 16, 32, 64)");
@@ -3108,6 +3184,7 @@ dispatch_mlp_glu_combine_fwd_bf16(
     const at::Tensor &num_tokens,
     const at::Tensor &tokens_per_expert,
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -3119,31 +3196,31 @@ dispatch_mlp_glu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         default:
             throw std::runtime_error("MoK: dispatch_mlp_swiglu_combine_fwd_bf16 unsupported num_devices=" +
                                      std::to_string(num_devices) + " (supported: 4, 8, 16, 32, 64)");
@@ -3205,6 +3282,7 @@ dispatch_mlp_glu_combine_bwd_mxfp8(
 
     // Metadata
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -3227,7 +3305,7 @@ dispatch_mlp_glu_combine_bwd_mxfp8(
                 w_routed_gate, w_routed_gate_sc,
                 w_routed_up, w_routed_up_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3243,7 +3321,7 @@ dispatch_mlp_glu_combine_bwd_mxfp8(
                 w_routed_gate, w_routed_gate_sc,
                 w_routed_up, w_routed_up_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3259,7 +3337,7 @@ dispatch_mlp_glu_combine_bwd_mxfp8(
                 w_routed_gate, w_routed_gate_sc,
                 w_routed_up, w_routed_up_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3275,7 +3353,7 @@ dispatch_mlp_glu_combine_bwd_mxfp8(
                 w_routed_gate, w_routed_gate_sc,
                 w_routed_up, w_routed_up_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3291,7 +3369,7 @@ dispatch_mlp_glu_combine_bwd_mxfp8(
                 w_routed_gate, w_routed_gate_sc,
                 w_routed_up, w_routed_up_sc,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         default:
             throw std::runtime_error("MoK: dispatch_mlp_swiglu_combine_bwd_mxfp8 unsupported num_devices=" +
                                      std::to_string(num_devices) + " (supported: 4, 8, 16, 32, 64)");
@@ -3331,6 +3409,7 @@ dispatch_mlp_glu_combine_bwd_bf16(
     const at::Tensor &num_tokens,
     const at::Tensor &tokens_per_expert,
     int topk,
+    std::optional<float> swiglu_limit,
     int num_comm_sms,
     int macrobatch_size,
     int minibatch_size
@@ -3344,7 +3423,7 @@ dispatch_mlp_glu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
             return dispatch_mlp_swiglu_combiner<8, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3352,7 +3431,7 @@ dispatch_mlp_glu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
             return dispatch_mlp_swiglu_combiner<16, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3360,7 +3439,7 @@ dispatch_mlp_glu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
             return dispatch_mlp_swiglu_combiner<32, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3368,7 +3447,7 @@ dispatch_mlp_glu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
             return dispatch_mlp_swiglu_combiner<64, utils::RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
@@ -3376,7 +3455,7 @@ dispatch_mlp_glu_combine_bwd_bf16(
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 x_routed, gate_shared, gate_routed, up_shared, up_routed, hidden_shared, hidden_routed, x, x_ptrs,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
-                topk, num_comm_sms, macrobatch_size, minibatch_size);
+                topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         default:
             throw std::runtime_error("MoK: dispatch_mlp_swiglu_combine_bwd_bf16 unsupported num_devices=" +
                                      std::to_string(num_devices) + " (supported: 4, 8, 16, 32, 64)");

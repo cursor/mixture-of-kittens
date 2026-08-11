@@ -493,6 +493,7 @@ def forward(
     routed_gate_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     routed_up_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     routed_down_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    swiglu_limit: float | None = None,
 ) -> tuple[
     torch.Tensor,
     MoKForwardContext,
@@ -511,6 +512,7 @@ def forward(
         routed_gate_weights: bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 data/scale tuple
         routed_up_weights:   bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 data/scale tuple
         routed_down_weights: bfloat16 [num_local_experts, hidden_size, intermediate_size] or MXFP8 data/scale tuple
+        swiglu_limit:        float | None
 
     Outputs:
         output:          bfloat16 [num_local_tokens, hidden_size]
@@ -549,7 +551,7 @@ def forward(
             shared_down_weights, routed_down_weights_fp8, routed_down_weights_sc,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.fwd_num_comm_sms,
+            workspace.topk, swiglu_limit, config.fwd_num_comm_sms,
             config.macrobatch_size, config.minibatch_size,
         )
         forward_context = MoKForwardContext(
@@ -572,7 +574,7 @@ def forward(
             shared_down_weights, routed_down_weights,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.fwd_num_comm_sms,
+            workspace.topk, swiglu_limit, config.fwd_num_comm_sms,
             config.macrobatch_size, config.minibatch_size,
         )
         forward_context = MoKForwardContext(
@@ -606,6 +608,7 @@ def backward(
     routed_gate_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     routed_up_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     routed_down_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    swiglu_limit: float | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
@@ -632,6 +635,7 @@ def backward(
         routed_gate_weights: bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 tensor tuple
         routed_up_weights:   bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 tensor tuple
         routed_down_weights: bfloat16 [num_local_experts, hidden_size, intermediate_size] or MXFP8 tensor tuple
+        swiglu_limit:        float | None
 
     Outputs:
         d_x:                   bfloat16 [num_local_tokens, hidden_size]
@@ -696,7 +700,7 @@ def backward(
             routed_up_weights_fp8, routed_up_weights_sc,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.bwd_num_comm_sms,
+            workspace.topk, swiglu_limit, config.bwd_num_comm_sms,
             config.macrobatch_size, config.minibatch_size,
         )
     else:
@@ -721,7 +725,7 @@ def backward(
             workspace.x_buffer, workspace.x_buffer_ptrs,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
-            workspace.topk, config.bwd_num_comm_sms,
+            workspace.topk, swiglu_limit, config.bwd_num_comm_sms,
             config.macrobatch_size, config.minibatch_size,
         )
 

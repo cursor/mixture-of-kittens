@@ -53,7 +53,9 @@ struct globals_fwd_epilogue {
     activation_gl output;          // (num_local_tokens, H)
 
     __host__ inline dim3 grid() const {
-        return dim3((y_shared.cols() + Nb - 1) / Nb, y_shared.rows() / TOKENS_PER_CTA);
+        const int col_blocks = (y_shared.cols() + Nb - 1) / Nb;
+        const int token_blocks = y_shared.rows() / TOKENS_PER_CTA;
+        return dim3(col_blocks * token_blocks);
     }
     __host__ inline int dynamic_shared_memory() const {
         return TOKENS_PER_CTA * ((topk_weights.cols() + 1) * sizeof(token_vec) + topk_weights.cols() * sizeof(float)) + 1024;
@@ -67,8 +69,9 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals_fwd_epi
     const int tid = threadIdx.x;
     const int topk = g.topk_weights.cols();
     const int num_tokens_per_stage = topk + 1;
-    const int col_block_idx = blockIdx.x;
-    const int first_token_idx = blockIdx.y * TOKENS_PER_CTA;
+    const int col_blocks = (g.y_shared.cols() + globals_fwd_epilogue::Nb - 1) / globals_fwd_epilogue::Nb;
+    const int col_block_idx = blockIdx.x % col_blocks;
+    const int first_token_idx = blockIdx.x / col_blocks * TOKENS_PER_CTA;
 
     extern __shared__ int __shm[];
     auto *token_vecs = reinterpret_cast<globals_fwd_epilogue::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));
@@ -146,7 +149,8 @@ struct globals_bwd_epilogue {
     activation_gl d_x;               // (num_local_tokens, H)
 
     __host__ inline dim3 grid() const {
-        return dim3((d_x_shared.cols() + Nb - 1) / Nb, d_x_shared.rows());
+        const int col_blocks = (d_x_shared.cols() + Nb - 1) / Nb;
+        return dim3(col_blocks * d_x_shared.rows());
     }
     __host__ inline int dynamic_shared_memory() const { return (d_x_routed_buffer.rows() / d_x_shared.rows() + 1) * sizeof(token_vec) + 1024; }
 };
@@ -157,8 +161,9 @@ static __device__ __forceinline__ void bwd_epilogue_kernel(const globals_bwd_epi
     const int tid = threadIdx.x;
     const int topk = g.d_x_routed_buffer.rows() / g.d_x_shared.rows();
     const int num_vecs = topk + 1;
-    const int token_idx = blockIdx.y;
-    const int col_block_idx = blockIdx.x;
+    const int col_blocks = (g.d_x_shared.cols() + globals_bwd_epilogue::Nb - 1) / globals_bwd_epilogue::Nb;
+    const int token_idx = blockIdx.x / col_blocks;
+    const int col_block_idx = blockIdx.x % col_blocks;
 
     extern __shared__ int __shm[];
     auto *token_vecs = reinterpret_cast<globals_bwd_epilogue::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));

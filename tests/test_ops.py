@@ -24,6 +24,7 @@ from .utils import (
     generate_inputs,
     generate_topk_experts,
     mok_params,
+    swiglu_params,
     run_all_gather_top_experts_reference,
     run_bwd_epilogue_reference,
     run_forward_reference_bf16,
@@ -342,9 +343,10 @@ def test_dispatch_mlp_swiglu_combine_fwd_mxfp8(
     context: tuple[int, int, torch.device],
 ) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -433,6 +435,7 @@ def test_dispatch_mlp_swiglu_combine_fwd_mxfp8(
             mok_schedule.num_tokens,
             mok_schedule.tokens_per_expert,
             topk,
+            swiglu_limit,
             fwd_num_comm_sms,
             macrobatch_size,
             minibatch_size,
@@ -457,12 +460,13 @@ def test_dispatch_mlp_swiglu_combine_fwd_mxfp8(
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
         for name, expected, result in zip(
             FORWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 MXFP8_TOLERANCE,
@@ -548,6 +552,7 @@ def test_dispatch_mlp_swiglu_combine_fwd_mxfp8(
         "num_tokens": mok_schedule.num_tokens,
         "tokens_per_expert": mok_schedule.tokens_per_expert,
         "topk": topk,
+        "swiglu_limit": None,
         "num_comm_sms": 2,
         "macrobatch_size": 256,
         "minibatch_size": 256,
@@ -607,9 +612,10 @@ def test_dispatch_mlp_swiglu_combine_fwd_bf16(
     context: tuple[int, int, torch.device],
 ) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -677,6 +683,7 @@ def test_dispatch_mlp_swiglu_combine_fwd_bf16(
             mok_schedule.num_tokens,
             mok_schedule.tokens_per_expert,
             topk,
+            swiglu_limit,
             fwd_num_comm_sms,
             macrobatch_size,
             minibatch_size,
@@ -701,12 +708,13 @@ def test_dispatch_mlp_swiglu_combine_fwd_bf16(
             w_routed_gate,
             w_routed_up,
             w_routed_down,
+            swiglu_limit,
         )
         for name, expected, result in zip(
             FORWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 BF16_TOLERANCE,
@@ -783,6 +791,7 @@ def test_dispatch_mlp_swiglu_combine_fwd_bf16(
         "num_tokens": mok_schedule.num_tokens,
         "tokens_per_expert": mok_schedule.tokens_per_expert,
         "topk": topk,
+        "swiglu_limit": None,
         "num_comm_sms": 2,
         "macrobatch_size": 256,
         "minibatch_size": 256,
@@ -842,9 +851,10 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
     context: tuple[int, int, torch.device],
 ) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -947,6 +957,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
             mok_schedule.num_tokens,
             mok_schedule.tokens_per_expert,
             topk,
+            swiglu_limit,
             fwd_num_comm_sms,
             macrobatch_size,
             minibatch_size,
@@ -1003,6 +1014,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
             mok_schedule.num_tokens,
             mok_schedule.tokens_per_expert,
             topk,
+            swiglu_limit,
             bwd_num_comm_sms,
             macrobatch_size,
             minibatch_size,
@@ -1021,12 +1033,12 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
             outputs[14],
             outputs[16],
         )
-        reference = run_reference_bf16(*inputs)[1:]
+        reference = run_reference_bf16(*inputs, swiglu_limit)[1:]
         for name, expected, result in zip(
             BACKWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 MXFP8_TOLERANCE,
@@ -1138,6 +1150,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
         mok_schedule.num_tokens,
         mok_schedule.tokens_per_expert,
         topk,
+        None,
         2,
         256,
         256,
@@ -1194,6 +1207,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
         "num_tokens": mok_schedule.num_tokens,
         "tokens_per_expert": mok_schedule.tokens_per_expert,
         "topk": topk,
+        "swiglu_limit": None,
         "num_comm_sms": 2,
         "macrobatch_size": 256,
         "minibatch_size": 256,
@@ -1252,9 +1266,10 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
     context: tuple[int, int, torch.device],
 ) -> None:
     rank, world_size, device = context
-    for shape, params in itertools.product(shapes(world_size), mok_params()):
+    for shape, mok_param, swiglu_param in itertools.product(shapes(world_size), mok_params(), swiglu_params()):
         shape_name, num_experts, hidden_dim, intermediate_dim, topk, num_local_tokens = shape
-        params_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = params
+        mok_param_name, fwd_num_comm_sms, bwd_num_comm_sms, minibatch_size, macrobatch_size = mok_param
+        swiglu_param_name, swiglu_limit = swiglu_param
         assert num_experts % world_size == 0
         num_local_experts = num_experts // world_size
         config = functional.MoKConfig(
@@ -1332,6 +1347,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
             mok_schedule.num_tokens,
             mok_schedule.tokens_per_expert,
             topk,
+            swiglu_limit,
             fwd_num_comm_sms,
             macrobatch_size,
             minibatch_size,
@@ -1377,6 +1393,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
             mok_schedule.num_tokens,
             mok_schedule.tokens_per_expert,
             topk,
+            swiglu_limit,
             bwd_num_comm_sms,
             macrobatch_size,
             minibatch_size,
@@ -1395,12 +1412,12 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
             outputs[11],
             outputs[13],
         )
-        reference = run_reference_bf16(*inputs)[1:]
+        reference = run_reference_bf16(*inputs, swiglu_limit)[1:]
         for name, expected, result in zip(
             BACKWARD_RESULT_NAMES, reference, actual, strict=True
         ):
             check_correctness(
-                f"{shape_name}/{params_name}/{name}",
+                f"{shape_name}/{mok_param_name}/{swiglu_param_name}/{name}",
                 expected,
                 result,
                 BF16_TOLERANCE,
@@ -1487,6 +1504,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
         mok_schedule.num_tokens,
         mok_schedule.tokens_per_expert,
         topk,
+        None,
         2,
         256,
         256,
@@ -1532,6 +1550,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
         "num_tokens": mok_schedule.num_tokens,
         "tokens_per_expert": mok_schedule.tokens_per_expert,
         "topk": topk,
+        "swiglu_limit": None,
         "num_comm_sms": 2,
         "macrobatch_size": 256,
         "minibatch_size": 256,

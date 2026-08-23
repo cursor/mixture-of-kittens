@@ -236,6 +236,29 @@ output, forward_context = functional.forward(
 )
 ```
 
+### Manual activation checkpointing
+
+The example above saves the first macrobatch's forward intermediates for the backward pass. While we recommend this pattern, you can avoid storing them by discarding the returned context and rebuilding it immediately before backward with `functional.recompute_forward_context`.
+
+```python
+# Forward pass
+output, discarded_forward_context = functional.forward(...)  # same call as above
+del discarded_forward_context
+
+# Backward pass
+forward_context = functional.recompute_forward_context(
+    config,
+    workspace,
+    schedule,
+    x,
+    w_shared_gate,
+    w_shared_up,
+    (w_routed_gate_fp8, w_routed_gate_sc),
+    (w_routed_up_fp8, w_routed_up_sc),
+)
+gradients = functional.backward(...)  # same backward call as above
+```
+
 ## Contributing
 
 Contributions are welcome! See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.

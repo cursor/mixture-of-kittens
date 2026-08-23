@@ -38,8 +38,8 @@ def all_gather_top_experts(
     if any(size <= 0 for size in all_gather_top_experts_buffer.shape):
         raise ValueError("all_gather_top_experts_buffer dimensions must be positive")
     ep_size = all_gather_top_experts_buffer.shape[0]
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("all_gather_top_experts_buffer ep_size must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("all_gather_top_experts_buffer ep_size must be one of 1, 4, 8, 16, 32, 64")
     if (all_gather_top_experts_buffer.device != top_experts.device
             or tuple(all_gather_top_experts_buffer.shape[1:]) != tuple(top_experts.shape)):
         raise ValueError("all_gather_top_experts_buffer must match top_experts shape and device")
@@ -55,7 +55,10 @@ def all_gather_top_experts(
     if rank_buffer_bytes % chunk_bytes != 0:
         raise ValueError("chunk_bytes must divide one rank's route-buffer bytes")
 
-    _C.all_gather_top_experts(top_experts, all_gather_top_experts_buffer, all_gather_top_experts_buffer_multicast_ptr, rank, chunk_bytes)
+    if ep_size == 1:
+        all_gather_top_experts_buffer[0].copy_(top_experts)
+    else:
+        _C.all_gather_top_experts(top_experts, all_gather_top_experts_buffer, all_gather_top_experts_buffer_multicast_ptr, rank, chunk_bytes)
 
 
 @torch.library.custom_op("mok::barrier_all", mutates_args=("barrier_buffer", "target"))
@@ -88,8 +91,8 @@ def barrier_all(
         type(pointer) is not int or pointer <= 0 for pointer in barrier_buffer_ptrs):
         raise TypeError("barrier_buffer_ptrs must be a list of positive integers")
     ep_size = len(barrier_buffer_ptrs)
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("barrier_buffer_ptrs length must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("barrier_buffer_ptrs length must be one of 1, 4, 8, 16, 32, 64")
     if type(barrier_buffer_multicast_ptr) is not int or barrier_buffer_multicast_ptr <= 0:
         raise TypeError("barrier_buffer_multicast_ptr must be a positive integer")
     if (not target.is_cuda or target.device != barrier_buffer.device
@@ -97,7 +100,10 @@ def barrier_all(
             or tuple(target.shape) != (1,)):
         raise ValueError("target must be contiguous int32 [1] on the barrier CUDA device")
 
-    _C.barrier_all(barrier_buffer, barrier_buffer_ptrs, barrier_buffer_multicast_ptr, target)
+    if ep_size == 1:
+        return
+    else:
+        _C.barrier_all(barrier_buffer, barrier_buffer_ptrs, barrier_buffer_multicast_ptr, target)
 
 
 @torch.library.custom_op("mok::schedule", mutates_args=())
@@ -129,8 +135,8 @@ def schedule(
     if topk_all.ndim != 3:
         raise ValueError("topk_all must have shape (ep_size, num_local_tokens, topk)")
     ep_size, num_local_tokens, topk = topk_all.shape
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("topk_all ep_size must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("topk_all ep_size must be one of 1, 4, 8, 16, 32, 64")
     if num_local_tokens < 512 or num_local_tokens % 256 != 0:
         raise ValueError(
             "topk_all num_local_tokens must be at least 512 and divisible by 256"
@@ -297,8 +303,8 @@ def _dispatch_mlp_glu_combine_fwd_mxfp8_impl(
         ):
             raise TypeError(f"{pointer_name} must be a list of positive integers")
     ep_size = len(x_ptrs)
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("x_ptrs length must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("x_ptrs length must be one of 1, 4, 8, 16, 32, 64")
     if len(combine_buffer_ptrs) != ep_size:
         raise ValueError("combine_buffer_ptrs length must match x_ptrs")
     if w_shared_gate.ndim != 2:
@@ -465,8 +471,8 @@ def _dispatch_mlp_glu_combine_fwd_bf16_impl(
         ):
             raise TypeError(f"{pointer_name} must be a list of positive integers")
     ep_size = len(x_ptrs)
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("x_ptrs length must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("x_ptrs length must be one of 1, 4, 8, 16, 32, 64")
     if len(combine_buffer_ptrs) != ep_size:
         raise ValueError("combine_buffer_ptrs length must match x_ptrs")
     if schedule_peer_rank.ndim != 1 or schedule_peer_rank.numel() == 0:
@@ -509,6 +515,268 @@ def _dispatch_mlp_glu_combine_fwd_bf16_impl(
         x, x_ptrs, combine_buffer, combine_buffer_ptrs,
         w_shared_gate, w_routed_gate, w_shared_up, w_routed_up,
         w_shared_down, w_routed_down,
+        schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
+        topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
+    )
+
+
+@torch.library.custom_op("mok::recompute_forward_context_mxfp8", mutates_args=())
+def recompute_forward_context_mxfp8(
+    x: torch.Tensor,
+    x_ptrs: list[int],
+    w_shared_gate: torch.Tensor,
+    w_routed_gate: torch.Tensor,
+    w_routed_gate_sc: torch.Tensor,
+    w_shared_up: torch.Tensor,
+    w_routed_up: torch.Tensor,
+    w_routed_up_sc: torch.Tensor,
+    schedule_peer_rank: torch.Tensor,
+    schedule_peer_token_idx: torch.Tensor,
+    num_tokens: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    topk: int,
+    swiglu_limit: float | None,
+    num_comm_sms: int,
+    macrobatch_size: int,
+    minibatch_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Recomputes the MXFP8 MoE forward context.
+
+    Inputs:
+        x:                       bfloat16 [num_local_tokens, hidden_size]
+        x_ptrs:                  list[int] [ep_size]
+        w_shared_gate:           bfloat16 [intermediate_size, hidden_size]
+        w_routed_gate:           float8_e4m3fn [num_local_experts, intermediate_size, hidden_size]
+        w_routed_gate_sc:        uint8 [num_local_experts * intermediate_size // 128, hidden_size // 128, 32, 16]
+        w_shared_up:             bfloat16 [intermediate_size, hidden_size]
+        w_routed_up:             float8_e4m3fn [num_local_experts, intermediate_size, hidden_size]
+        w_routed_up_sc:          uint8 [num_local_experts * intermediate_size // 128, hidden_size // 128, 32, 16]
+        schedule_peer_rank:      int32 [schedule_capacity]
+        schedule_peer_token_idx: int32 [schedule_capacity]
+        num_tokens:              int32 [1]
+        tokens_per_expert:       int32 [num_local_experts]
+        topk:                    int
+        swiglu_limit:            float | None
+        num_comm_sms:            int
+        macrobatch_size:         int
+        minibatch_size:          int
+
+    Outputs:
+        x_fp8_t_routed:      float8_e4m3fn [hidden_size, macrobatch_size]
+        x_sc_t_routed:       uint8 [hidden_size // 128, macrobatch_size // 128, 32, 16]
+        gate_shared:         bfloat16 [num_local_tokens, intermediate_size]
+        gate_fp8_routed:     float8_e4m3fn [macrobatch_size, intermediate_size]
+        gate_sc_routed:      uint8 [macrobatch_size // 128, intermediate_size // 128, 32, 16]
+        up_shared:           bfloat16 [num_local_tokens, intermediate_size]
+        up_fp8_routed:       float8_e4m3fn [macrobatch_size, intermediate_size]
+        up_sc_routed:        uint8 [macrobatch_size // 128, intermediate_size // 128, 32, 16]
+        hidden_shared:       bfloat16 [num_local_tokens, intermediate_size]
+        hidden_fp8_t_routed: float8_e4m3fn [intermediate_size, macrobatch_size]
+        hidden_sc_t_routed:  uint8 [intermediate_size // 128, macrobatch_size // 128, 32, 16]
+    """
+    if x.ndim != 2:
+        raise ValueError("x must have shape (num_local_tokens, hidden_size)")
+    num_local_tokens, hidden_size = x.shape
+    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
+        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
+    if hidden_size <= 0 or hidden_size % 256 != 0:
+        raise ValueError("hidden_size must be positive and divisible by 256")
+    if type(topk) is not int or not 0 < topk <= 255:
+        raise ValueError("topk must be an integer in [1, 255]")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
+        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
+        raise ValueError("num_comm_sms must be a positive even integer")
+    if (type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0):
+        raise ValueError("minibatch_size must be positive and divisible by 256")
+    if (type(macrobatch_size) is not int or macrobatch_size <= 0 or macrobatch_size % minibatch_size != 0):
+        raise ValueError("macrobatch_size must be a positive multiple of minibatch_size")
+    if not isinstance(x_ptrs, list) or any(type(pointer) is not int or pointer <= 0 for pointer in x_ptrs):
+        raise TypeError("x_ptrs must be a list of positive integers")
+    ep_size = len(x_ptrs)
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("x_ptrs length must be one of 1, 4, 8, 16, 32, 64")
+    if w_shared_gate.ndim != 2:
+        raise ValueError("w_shared_gate must have shape (intermediate_size, hidden_size)")
+    intermediate_size = w_shared_gate.shape[0]
+    if intermediate_size <= 0 or intermediate_size % 256 != 0:
+        raise ValueError("intermediate_size must be positive and divisible by 256")
+    if w_routed_gate.ndim != 3 or w_routed_gate.shape[0] <= 0:
+        raise ValueError("w_routed_gate must have shape "
+                         "(num_local_experts, intermediate_size, hidden_size)")
+    num_local_experts = w_routed_gate.shape[0]
+    expected_shapes = (
+        ("w_shared_gate", w_shared_gate, (intermediate_size, hidden_size)),
+        ("w_routed_gate", w_routed_gate, (num_local_experts, intermediate_size, hidden_size)),
+        ("w_routed_gate_sc", w_routed_gate_sc,
+         (num_local_experts * intermediate_size // 128, hidden_size // 128, 32, 16)),
+        ("w_shared_up", w_shared_up, (intermediate_size, hidden_size)),
+        ("w_routed_up", w_routed_up, (num_local_experts, intermediate_size, hidden_size)),
+        ("w_routed_up_sc", w_routed_up_sc,
+         (num_local_experts * intermediate_size // 128, hidden_size // 128, 32, 16)),
+    )
+    for tensor_name, tensor, expected_shape in expected_shapes:
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(f"{tensor_name} must have shape {expected_shape}")
+    for tensor_name, tensor in (
+        ("w_shared_gate", w_shared_gate),
+        ("w_routed_gate", w_routed_gate),
+        ("w_routed_gate_sc", w_routed_gate_sc),
+        ("w_shared_up", w_shared_up),
+        ("w_routed_up", w_routed_up),
+        ("w_routed_up_sc", w_routed_up_sc),
+        ("schedule_peer_rank", schedule_peer_rank),
+        ("schedule_peer_token_idx", schedule_peer_token_idx),
+        ("num_tokens", num_tokens),
+        ("tokens_per_expert", tokens_per_expert),
+    ):
+        if tensor.device != x.device:
+            raise ValueError(f"{tensor_name} must be on {x.device}")
+    if schedule_peer_rank.ndim != 1 or schedule_peer_rank.numel() == 0:
+        raise ValueError("schedule_peer_rank must be a nonempty 1D tensor")
+    schedule_capacity = schedule_peer_rank.numel()
+    if schedule_capacity % 256 != 0:
+        raise ValueError("schedule_capacity must be divisible by 256")
+    if tuple(schedule_peer_token_idx.shape) != (schedule_capacity,):
+        raise ValueError("schedule_peer_token_idx must have shape (schedule_capacity,)")
+    if tuple(num_tokens.shape) != (1,):
+        raise ValueError("num_tokens must have shape (1,)")
+    if tuple(tokens_per_expert.shape) != (num_local_experts,):
+        raise ValueError("tokens_per_expert must have shape (num_local_experts,)")
+
+    return _C.recompute_forward_context_mxfp8(
+        x, x_ptrs,
+        w_shared_gate, w_routed_gate, w_routed_gate_sc,
+        w_shared_up, w_routed_up, w_routed_up_sc,
+        schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
+        topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
+    )
+
+
+@torch.library.custom_op("mok::recompute_forward_context_bf16", mutates_args=())
+def recompute_forward_context_bf16(
+    x: torch.Tensor,
+    x_ptrs: list[int],
+    w_shared_gate: torch.Tensor,
+    w_routed_gate: torch.Tensor,
+    w_shared_up: torch.Tensor,
+    w_routed_up: torch.Tensor,
+    schedule_peer_rank: torch.Tensor,
+    schedule_peer_token_idx: torch.Tensor,
+    num_tokens: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    topk: int,
+    swiglu_limit: float | None,
+    num_comm_sms: int,
+    macrobatch_size: int,
+    minibatch_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Recomputes the BF16 MoE forward context.
+
+    Inputs:
+        x:                       bfloat16 [num_local_tokens, hidden_size]
+        x_ptrs:                  list[int] [ep_size]
+        w_shared_gate:           bfloat16 [intermediate_size, hidden_size]
+        w_routed_gate:           bfloat16 [num_local_experts, intermediate_size, hidden_size]
+        w_shared_up:             bfloat16 [intermediate_size, hidden_size]
+        w_routed_up:             bfloat16 [num_local_experts, intermediate_size, hidden_size]
+        schedule_peer_rank:      int32 [schedule_capacity]
+        schedule_peer_token_idx: int32 [schedule_capacity]
+        num_tokens:              int32 [1]
+        tokens_per_expert:       int32 [num_local_experts]
+        topk:                    int
+        swiglu_limit:            float | None
+        num_comm_sms:            int
+        macrobatch_size:         int
+        minibatch_size:          int
+
+    Outputs:
+        x_routed:      bfloat16 [macrobatch_size, hidden_size]
+        gate_shared:   bfloat16 [num_local_tokens, intermediate_size]
+        gate_routed:   bfloat16 [macrobatch_size, intermediate_size]
+        up_shared:     bfloat16 [num_local_tokens, intermediate_size]
+        up_routed:     bfloat16 [macrobatch_size, intermediate_size]
+        hidden_shared: bfloat16 [num_local_tokens, intermediate_size]
+        hidden_routed: bfloat16 [macrobatch_size, intermediate_size]
+    """
+    if x.ndim != 2:
+        raise ValueError("x must have shape (num_local_tokens, hidden_size)")
+    num_local_tokens, hidden_size = x.shape
+    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
+        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
+    if hidden_size <= 0 or hidden_size % 256 != 0:
+        raise ValueError("hidden_size must be positive and divisible by 256")
+    if w_shared_gate.ndim != 2 or w_shared_gate.shape[1] != hidden_size:
+        raise ValueError("w_shared_gate must have shape (intermediate_size, hidden_size)")
+    intermediate_size = w_shared_gate.shape[0]
+    if intermediate_size <= 0 or intermediate_size % 256 != 0:
+        raise ValueError("intermediate_size must be positive and divisible by 256")
+    if w_routed_gate.ndim != 3 or w_routed_gate.shape[0] <= 0:
+        raise ValueError("w_routed_gate must have shape (num_local_experts, intermediate_size, hidden_size)")
+    num_local_experts = w_routed_gate.shape[0]
+    if type(topk) is not int or not 0 < topk <= 255:
+        raise ValueError("topk must be an integer in [1, 255]")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
+        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
+        raise ValueError("num_comm_sms must be a positive even integer")
+    if type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0:
+        raise ValueError("minibatch_size must be positive and divisible by 256")
+    if type(macrobatch_size) is not int or macrobatch_size <= 0 or macrobatch_size % minibatch_size != 0:
+        raise ValueError("macrobatch_size must be a positive multiple of minibatch_size")
+    if not isinstance(x_ptrs, list) or any(
+        type(pointer) is not int or pointer <= 0 for pointer in x_ptrs
+    ):
+        raise TypeError("x_ptrs must be a list of positive integers")
+    ep_size = len(x_ptrs)
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("x_ptrs length must be one of 1, 4, 8, 16, 32, 64")
+    if schedule_peer_rank.ndim != 1 or schedule_peer_rank.numel() == 0:
+        raise ValueError("schedule_peer_rank must be a nonempty 1D tensor")
+    schedule_capacity = schedule_peer_rank.numel()
+    if schedule_capacity % 256 != 0:
+        raise ValueError("schedule_capacity must be divisible by 256")
+    expected_shapes = (
+        ("w_shared_gate", w_shared_gate, (intermediate_size, hidden_size)),
+        ("w_routed_gate", w_routed_gate, (num_local_experts, intermediate_size, hidden_size)),
+        ("w_shared_up", w_shared_up, (intermediate_size, hidden_size)),
+        ("w_routed_up", w_routed_up, (num_local_experts, intermediate_size, hidden_size)),
+        ("schedule_peer_token_idx", schedule_peer_token_idx, (schedule_capacity,)),
+        ("num_tokens", num_tokens, (1,)),
+        ("tokens_per_expert", tokens_per_expert, (num_local_experts,)),
+    )
+    for tensor_name, tensor, expected_shape in expected_shapes:
+        if tuple(tensor.shape) != expected_shape:
+            raise ValueError(f"{tensor_name} must have shape {expected_shape}")
+    for tensor_name, tensor, _ in expected_shapes:
+        if tensor.device != x.device:
+            raise ValueError(f"{tensor_name} must be on {x.device}")
+    if schedule_peer_rank.device != x.device:
+        raise ValueError(f"schedule_peer_rank must be on {x.device}")
+
+    return _C.recompute_forward_context_bf16(
+        x, x_ptrs,
+        w_shared_gate, w_routed_gate, w_shared_up, w_routed_up,
         schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
         topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size,
     )
@@ -677,8 +945,8 @@ def _dispatch_mlp_glu_combine_bwd_mxfp8_impl(
         ):
             raise TypeError(f"{pointer_name} must be a list of positive integers")
     ep_size = len(x_ptrs)
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("x_ptrs length must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("x_ptrs length must be one of 1, 4, 8, 16, 32, 64")
     for pointer_name, pointers in (
         ("d_y_buffer_ptrs", d_y_buffer_ptrs),
         ("d_x_routed_buffer_ptrs", d_x_routed_buffer_ptrs),
@@ -944,8 +1212,8 @@ def _dispatch_mlp_glu_combine_bwd_bf16_impl(
         ):
             raise TypeError(f"{pointer_name} must be a list of positive integers")
     ep_size = len(x_ptrs)
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("x_ptrs length must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("x_ptrs length must be one of 1, 4, 8, 16, 32, 64")
     for pointer_name, pointers in pointer_lists[:-1]:
         if len(pointers) != ep_size:
             raise ValueError(f"{pointer_name} length must match x_ptrs")

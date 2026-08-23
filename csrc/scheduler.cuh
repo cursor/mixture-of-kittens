@@ -146,7 +146,7 @@ static __device__ __forceinline__ void schedule_kernel(const globals &G) {
     }
 }
 
-static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> schedule(
+static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> schedule_entrypoint(
     const at::Tensor &topk_all,
     const int num_local_experts,
     const int schedule_capacity,

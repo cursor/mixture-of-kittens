@@ -7,7 +7,7 @@
 
 using namespace kittens;
 
-namespace mxfp8_quantize {
+namespace mxfp8 {
 
 struct config {
     static constexpr int Mb = 128;
@@ -42,7 +42,7 @@ struct globals {
     }
 };
 
-static __device__ __forceinline__ void mxfp8_quantize_single_block(
+static __device__ __forceinline__ void quantize_single_block(
     const bf16_2 (&values_bf16)[16],
     uint32_t (&values_fp8)[8],
     uint32_t &scale_byte
@@ -71,7 +71,7 @@ static __device__ __forceinline__ void mxfp8_quantize_single_block(
     }
 }
 
-static __device__ __forceinline__ void mxfp8_dequantize_single_block(
+static __device__ __forceinline__ void dequantize_single_block(
     const uint32_t (&values_fp8)[8],
     const uint32_t scale_byte,
     float2 (&values_fp32)[16]
@@ -90,7 +90,7 @@ static __device__ __forceinline__ void mxfp8_dequantize_single_block(
 }
 
 template <bool RETURN_NORMAL, bool RETURN_TRANSPOSED, int SRC_ROW_STRIDE = 128, bool SPLIT_PASSES = false, bool SCALE_ROWS = false>
-static __device__ __forceinline__ void mxfp8_quantize_tile(
+static __device__ __forceinline__ void quantize_tile(
     const globals::x_bf16_tile &x_bf16_tile,
     const globals::x_fp8_tile &x_fp8_tile,
     const globals::x_sc_tile &x_sc_tile,
@@ -148,7 +148,7 @@ static __device__ __forceinline__ void mxfp8_quantize_tile(
             // Quantize one 32-element block and store the FP8 output to shared memory
             uint32_t x_fp8_reg[PACKED_PER_K_BLOCK / 2];
             uint32_t scale_byte;
-            mxfp8_quantize_single_block(src, x_fp8_reg, scale_byte);
+            quantize_single_block(src, x_fp8_reg, scale_byte);
             scale_word |= scale_byte << (k_block_idx * 8);
             #pragma unroll
             for (int k = 0; k < PACKED_PER_K_BLOCK / 2; k++) {
@@ -186,7 +186,7 @@ static __device__ __forceinline__ void mxfp8_quantize_tile(
 }
 
 template <bool RETURN_NORMAL, bool RETURN_TRANSPOSED>
-static __device__ __forceinline__ void mxfp8_quantize_kernel(const globals &G) {
+static __device__ __forceinline__ void quantize_kernel(const globals &G) {
     // Allocate shared memory
     extern __shared__ int __shm[];
     const uint64_t smem_base_addr = (reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023);
@@ -215,7 +215,7 @@ static __device__ __forceinline__ void mxfp8_quantize_kernel(const globals &G) {
     wait(inputs_arrived, 0);
 
     // Quantize
-    mxfp8_quantize_tile<RETURN_NORMAL, RETURN_TRANSPOSED>(x_bf16_tile, x_fp8_tile, x_sc_tile, x_fp8_t_tile, x_sc_t_tile, nullptr, tid, 1);
+    quantize_tile<RETURN_NORMAL, RETURN_TRANSPOSED>(x_bf16_tile, x_fp8_tile, x_sc_tile, x_fp8_t_tile, x_sc_t_tile, nullptr, tid, 1);
     __syncthreads();
 
     // Store to global memory
@@ -232,13 +232,13 @@ static __device__ __forceinline__ void mxfp8_quantize_kernel(const globals &G) {
 }
 
 static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
-mxfp8_quantize_entrypoint(
+quantize_entrypoint(
     const at::Tensor &x_bf16,
     const bool return_normal,
     const bool return_transposed
 ) {
-    using C = mxfp8_quantize::config;
-    using G = mxfp8_quantize::globals;
+    using C = mxfp8::config;
+    using G = mxfp8::globals;
 
     const int E = x_bf16.dim() == 3 ? static_cast<int>(x_bf16.size(0)) : 1;
     const int M = static_cast<int>(x_bf16.size(-2));
@@ -268,13 +268,13 @@ mxfp8_quantize_entrypoint(
     };
 
     if (return_normal && return_transposed)
-        kittens::py::launch_kernel<C, G, mxfp8_quantize::mxfp8_quantize_kernel<true, true>>(g);
+        kittens::py::launch_kernel<C, G, mxfp8::quantize_kernel<true, true>>(g);
     else if (return_normal)
-        kittens::py::launch_kernel<C, G, mxfp8_quantize::mxfp8_quantize_kernel<true, false>>(g);
+        kittens::py::launch_kernel<C, G, mxfp8::quantize_kernel<true, false>>(g);
     else
-        kittens::py::launch_kernel<C, G, mxfp8_quantize::mxfp8_quantize_kernel<false, true>>(g);
+        kittens::py::launch_kernel<C, G, mxfp8::quantize_kernel<false, true>>(g);
 
     return {x_fp8, x_sc, x_fp8_t, x_sc_t};
 }
 
-} // namespace mxfp8_quantize
+} // namespace mxfp8

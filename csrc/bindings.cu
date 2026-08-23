@@ -1,18 +1,18 @@
-#include "mok_megakernel.cuh"
+#include "megakernel/entrypoints.cuh"
 #include "mxfp8.cuh"
 #include "scheduler.cuh"
 #include "utils.cuh"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("all_gather_top_experts", &utils::all_gather_top_experts::entrypoint, "",
+    m.def("all_gather_top_experts", &utils::all_gather_top_experts::all_gather_top_experts_entrypoint, "",
           pybind11::arg("top_experts"), pybind11::arg("all_gather_top_experts_buffer"),
           pybind11::arg("all_gather_top_experts_buffer_multicast_ptr"), pybind11::arg("rank"), pybind11::arg("chunk_bytes"));
-    m.def("barrier_all", &utils::barrier_all::entrypoint, "",
+    m.def("barrier_all", &utils::barrier_all::barrier_all_entrypoint, "",
           pybind11::arg("barrier_buffer"), pybind11::arg("barrier_buffer_ptrs"),
           pybind11::arg("barrier_buffer_multicast_ptr"), pybind11::arg("target"));
-    m.def("schedule", &scheduler::schedule, "",
+    m.def("schedule", &scheduler::schedule_entrypoint, "",
           pybind11::arg("topk_all"), pybind11::arg("num_local_experts"), pybind11::arg("schedule_capacity"), pybind11::arg("rank"));
-    m.def("mxfp8_quantize", &mxfp8_quantize::mxfp8_quantize_entrypoint, "",
+    m.def("mxfp8_quantize", &mxfp8::quantize_entrypoint, "",
           pybind11::arg("x_bf16"),
           pybind11::arg("return_normal"), pybind11::arg("return_transposed"));
     auto bind_glu_fwd_mxfp8 = [&](const char *name, auto function) {
@@ -28,10 +28,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_fwd_mxfp8("dispatch_mlp_swiglu_combine_fwd_mxfp8",
-                       &dispatch_mlp_glu_combine_fwd_mxfp8<GluActivation::SWIGLU>);
+        &dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint<GluActivation::SWIGLU>);
     bind_glu_fwd_mxfp8("dispatch_mlp_situglu_combine_fwd_mxfp8",
-                       &dispatch_mlp_glu_combine_fwd_mxfp8<GluActivation::SITUGLU>);
-
+        &dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint<GluActivation::SITUGLU>);
     auto bind_glu_bwd_mxfp8 = [&](const char *name, auto function) {
         m.def(name, function, "",
           pybind11::arg("d_y_buffer"), pybind11::arg("d_y_buffer_ptrs"),
@@ -54,10 +53,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_bwd_mxfp8("dispatch_mlp_swiglu_combine_bwd_mxfp8",
-                       &dispatch_mlp_glu_combine_bwd_mxfp8<GluActivation::SWIGLU>);
+        &dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint<GluActivation::SWIGLU>);
     bind_glu_bwd_mxfp8("dispatch_mlp_situglu_combine_bwd_mxfp8",
-                       &dispatch_mlp_glu_combine_bwd_mxfp8<GluActivation::SITUGLU>);
-
+        &dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint<GluActivation::SITUGLU>);
     auto bind_glu_fwd_bf16 = [&](const char *name, auto function) {
         m.def(name, function, "",
           pybind11::arg("x"), pybind11::arg("x_ptrs"),
@@ -71,10 +69,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_fwd_bf16("dispatch_mlp_swiglu_combine_fwd_bf16",
-                      &dispatch_mlp_glu_combine_fwd_bf16<GluActivation::SWIGLU>);
+        &dispatch_mlp_swiglu_combine_fwd_bf16_entrypoint<GluActivation::SWIGLU>);
     bind_glu_fwd_bf16("dispatch_mlp_situglu_combine_fwd_bf16",
-                      &dispatch_mlp_glu_combine_fwd_bf16<GluActivation::SITUGLU>);
-
+        &dispatch_mlp_swiglu_combine_fwd_bf16_entrypoint<GluActivation::SITUGLU>);
     auto bind_glu_bwd_bf16 = [&](const char *name, auto function) {
         m.def(name, function, "",
           pybind11::arg("d_y_buffer"), pybind11::arg("d_y_buffer_ptrs"),
@@ -95,11 +92,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
     };
     bind_glu_bwd_bf16("dispatch_mlp_swiglu_combine_bwd_bf16",
-                      &dispatch_mlp_glu_combine_bwd_bf16<GluActivation::SWIGLU>);
+        &dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint<GluActivation::SWIGLU>);
     bind_glu_bwd_bf16("dispatch_mlp_situglu_combine_bwd_bf16",
-                      &dispatch_mlp_glu_combine_bwd_bf16<GluActivation::SITUGLU>);
-    m.def("fwd_epilogue", &utils::fwd_epilogue, "",
+        &dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint<GluActivation::SITUGLU>);
+    m.def("fwd_epilogue", &utils::fwd_epilogue::fwd_epilogue_entrypoint, "",
           pybind11::arg("y_shared"), pybind11::arg("combine_buffer"), pybind11::arg("topk_weights"));
-    m.def("bwd_epilogue", &utils::bwd_epilogue, "",
+    m.def("bwd_epilogue", &utils::bwd_epilogue::bwd_epilogue_entrypoint, "",
           pybind11::arg("d_x_shared"), pybind11::arg("d_x_routed_buffer"));
+    m.def("recompute_forward_context_mxfp8", &recompute_forward_context_mxfp8_entrypoint, "",
+          pybind11::arg("x"), pybind11::arg("x_ptrs"),
+          pybind11::arg("w_shared_gate"), pybind11::arg("w_routed_gate"), pybind11::arg("w_routed_gate_sc"),
+          pybind11::arg("w_shared_up"), pybind11::arg("w_routed_up"), pybind11::arg("w_routed_up_sc"),
+          pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
+          pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
+          pybind11::arg("topk"), pybind11::arg("swiglu_limit"),
+          pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
+    m.def("recompute_forward_context_bf16", &recompute_forward_context_bf16_entrypoint, "",
+          pybind11::arg("x"), pybind11::arg("x_ptrs"),
+          pybind11::arg("w_shared_gate"), pybind11::arg("w_routed_gate"),
+          pybind11::arg("w_shared_up"), pybind11::arg("w_routed_up"),
+          pybind11::arg("schedule_peer_rank"), pybind11::arg("schedule_peer_token_idx"),
+          pybind11::arg("num_tokens"), pybind11::arg("tokens_per_expert"),
+          pybind11::arg("topk"), pybind11::arg("swiglu_limit"),
+          pybind11::arg("num_comm_sms"), pybind11::arg("macrobatch_size"), pybind11::arg("minibatch_size"));
 }

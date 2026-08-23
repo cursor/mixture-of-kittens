@@ -9,37 +9,15 @@ using namespace kittens;
 
 namespace utils {
 
-enum class RoutedPrecision {
-    BF16,
-    MXFP8,
-};
+namespace fwd_epilogue {
 
-static __global__ void zero_empty_routed_wgrads(
-    uint16_t *d_w_routed_gate,
-    uint16_t *d_w_routed_up,
-    uint16_t *d_w_routed_down,
-    const int *tokens_per_expert,
-    const int64_t elements_per_expert
-) {
-    const int expert_idx = blockIdx.y;
-    if (tokens_per_expert[expert_idx] != 0)
-        return;
-
-    const int64_t expert_offset = expert_idx * elements_per_expert;
-    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < elements_per_expert; idx += gridDim.x * blockDim.x) {
-        d_w_routed_gate[expert_offset + idx] = 0;
-        d_w_routed_up[expert_offset + idx] = 0;
-        d_w_routed_down[expert_offset + idx] = 0;
-    }
-}
-
-struct config_fwd_epilogue {
+struct config {
     static constexpr int CLUSTER_SIZE = 1;
     static constexpr int NUM_THREADS = 256;
     static constexpr int NUM_WARPS = NUM_THREADS / WARP_THREADS;
 };
 
-struct globals_fwd_epilogue {
+struct globals {
     static constexpr int Nb = 1024; // TMA ignores elements outside of box, so this supports arbitrary shapes
     static constexpr int TOKENS_PER_CTA = 2;
 
@@ -62,19 +40,19 @@ struct globals_fwd_epilogue {
     }
 };
 
-static __device__ __forceinline__ void fwd_epilogue_kernel(const globals_fwd_epilogue &g) {
-    constexpr int TOKENS_PER_CTA = globals_fwd_epilogue::TOKENS_PER_CTA;
-    using compute_group = group<config_fwd_epilogue::NUM_WARPS>;
+static __device__ __forceinline__ void fwd_epilogue_kernel(const globals &g) {
+    constexpr int TOKENS_PER_CTA = globals::TOKENS_PER_CTA;
+    using compute_group = group<config::NUM_WARPS>;
 
     const int tid = threadIdx.x;
     const int topk = g.topk_weights.cols();
     const int num_tokens_per_stage = topk + 1;
-    const int col_blocks = (g.y_shared.cols() + globals_fwd_epilogue::Nb - 1) / globals_fwd_epilogue::Nb;
+    const int col_blocks = (g.y_shared.cols() + globals::Nb - 1) / globals::Nb;
     const int col_block_idx = blockIdx.x % col_blocks;
     const int first_token_idx = blockIdx.x / col_blocks * TOKENS_PER_CTA;
 
     extern __shared__ int __shm[];
-    auto *token_vecs = reinterpret_cast<globals_fwd_epilogue::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));
+    auto *token_vecs = reinterpret_cast<globals::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));
     float *weights = reinterpret_cast<float*>(token_vecs + TOKENS_PER_CTA * num_tokens_per_stage); // (TOKENS_PER_CTA, topk)
 
     __shared__ semaphore inputs_arrived[TOKENS_PER_CTA];
@@ -82,7 +60,7 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals_fwd_epi
         #pragma unroll
         for (int stage = 0; stage < TOKENS_PER_CTA; ++stage) {
             init_semaphore(inputs_arrived[stage], 0, 1);
-            tma::expect_bytes(inputs_arrived[stage], num_tokens_per_stage * sizeof(globals_fwd_epilogue::token_vec));
+            tma::expect_bytes(inputs_arrived[stage], num_tokens_per_stage * sizeof(globals::token_vec));
         }
     }
     for (int i = tid; i < TOKENS_PER_CTA * topk; i += blockDim.x)
@@ -100,8 +78,8 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals_fwd_epi
 
     #pragma unroll
     for (int stage = 0; stage < TOKENS_PER_CTA; ++stage) {
-        globals_fwd_epilogue::token_vec *stage_vecs = token_vecs + stage * num_tokens_per_stage;
-        rv_fl<globals_fwd_epilogue::Nb / config_fwd_epilogue::NUM_WARPS> accumulator, term;
+        globals::token_vec *stage_vecs = token_vecs + stage * num_tokens_per_stage;
+        rv_fl<globals::Nb / config::NUM_WARPS> accumulator, term;
         wait(inputs_arrived[stage], 0);
         compute_group::load(accumulator, stage_vecs[0]);
         for (int k = 0; k < topk; ++k) {
@@ -116,29 +94,33 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals_fwd_epi
     }
 }
 
-static __host__ at::Tensor fwd_epilogue(
+static __host__ at::Tensor fwd_epilogue_entrypoint(
     const at::Tensor &y_shared,
     const at::Tensor &combine_buffer,
     const at::Tensor &topk_weights
 ) {
     at::Tensor output = at::empty_like(y_shared);
-    globals_fwd_epilogue g {
-        .y_shared = kittens::py::tensor_to_gl<globals_fwd_epilogue::activation_gl>(y_shared),
-        .combine_buffer = kittens::py::tensor_to_gl<globals_fwd_epilogue::activation_gl>(combine_buffer),
-        .topk_weights = kittens::py::tensor_to_gl<globals_fwd_epilogue::weight_gl>(topk_weights),
-        .output = kittens::py::tensor_to_gl<globals_fwd_epilogue::activation_gl>(output)
+    globals g {
+        .y_shared = kittens::py::tensor_to_gl<globals::activation_gl>(y_shared),
+        .combine_buffer = kittens::py::tensor_to_gl<globals::activation_gl>(combine_buffer),
+        .topk_weights = kittens::py::tensor_to_gl<globals::weight_gl>(topk_weights),
+        .output = kittens::py::tensor_to_gl<globals::activation_gl>(output)
     };
-    kittens::py::launch_kernel<config_fwd_epilogue, globals_fwd_epilogue, fwd_epilogue_kernel>(g);
+    kittens::py::launch_kernel<config, globals, fwd_epilogue_kernel>(g);
     return output;
 }
 
-struct config_bwd_epilogue {
+} // namespace fwd_epilogue
+
+namespace bwd_epilogue {
+
+struct config {
     static constexpr int CLUSTER_SIZE = 1;
     static constexpr int NUM_THREADS = 256;
     static constexpr int NUM_WARPS = NUM_THREADS / WARP_THREADS;
 };
 
-struct globals_bwd_epilogue {
+struct globals {
     static constexpr int Nb = 1024; // TMA ignores elements outside of box, so this supports arbitrary shapes
 
     using token_vec = sv_bf<Nb>;
@@ -155,23 +137,23 @@ struct globals_bwd_epilogue {
     __host__ inline int dynamic_shared_memory() const { return (d_x_routed_buffer.rows() / d_x_shared.rows() + 1) * sizeof(token_vec) + 1024; }
 };
 
-static __device__ __forceinline__ void bwd_epilogue_kernel(const globals_bwd_epilogue &g) {
-    using compute_group = group<config_bwd_epilogue::NUM_WARPS>;
+static __device__ __forceinline__ void bwd_epilogue_kernel(const globals &g) {
+    using compute_group = group<config::NUM_WARPS>;
 
     const int tid = threadIdx.x;
     const int topk = g.d_x_routed_buffer.rows() / g.d_x_shared.rows();
     const int num_vecs = topk + 1;
-    const int col_blocks = (g.d_x_shared.cols() + globals_bwd_epilogue::Nb - 1) / globals_bwd_epilogue::Nb;
+    const int col_blocks = (g.d_x_shared.cols() + globals::Nb - 1) / globals::Nb;
     const int token_idx = blockIdx.x / col_blocks;
     const int col_block_idx = blockIdx.x % col_blocks;
 
     extern __shared__ int __shm[];
-    auto *token_vecs = reinterpret_cast<globals_bwd_epilogue::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));
+    auto *token_vecs = reinterpret_cast<globals::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));
 
     __shared__ semaphore inputs_arrived;
     if (tid == 0) {
         init_semaphore(inputs_arrived, 0, 1);
-        tma::expect_bytes(inputs_arrived, num_vecs * sizeof(globals_bwd_epilogue::token_vec));
+        tma::expect_bytes(inputs_arrived, num_vecs * sizeof(globals::token_vec));
     }
     __syncthreads();
 
@@ -180,7 +162,7 @@ static __device__ __forceinline__ void bwd_epilogue_kernel(const globals_bwd_epi
     else if (tid < num_vecs)
         tma::load_async(token_vecs[tid], g.d_x_routed_buffer, {token_idx * topk + tid - 1, col_block_idx}, inputs_arrived);
 
-    rv_fl<globals_bwd_epilogue::Nb / config_bwd_epilogue::NUM_WARPS> accumulator, term;
+    rv_fl<globals::Nb / config::NUM_WARPS> accumulator, term;
     wait(inputs_arrived, 0);
     compute_group::load(accumulator, token_vecs[0]);
     for (int k = 0; k < topk; ++k) {
@@ -193,16 +175,18 @@ static __device__ __forceinline__ void bwd_epilogue_kernel(const globals_bwd_epi
         tma::store_async(g.d_x, token_vecs[0], {token_idx, col_block_idx});
 }
 
-static __host__ at::Tensor bwd_epilogue(const at::Tensor &d_x_shared, const at::Tensor &d_x_routed_buffer) {
+static __host__ at::Tensor bwd_epilogue_entrypoint(const at::Tensor &d_x_shared, const at::Tensor &d_x_routed_buffer) {
     at::Tensor d_x = at::empty_like(d_x_shared);
-    globals_bwd_epilogue g {
-        .d_x_shared = kittens::py::tensor_to_gl<globals_bwd_epilogue::activation_gl>(d_x_shared),
-        .d_x_routed_buffer = kittens::py::tensor_to_gl<globals_bwd_epilogue::activation_gl>(d_x_routed_buffer),
-        .d_x = kittens::py::tensor_to_gl<globals_bwd_epilogue::activation_gl>(d_x)
+    globals g {
+        .d_x_shared = kittens::py::tensor_to_gl<globals::activation_gl>(d_x_shared),
+        .d_x_routed_buffer = kittens::py::tensor_to_gl<globals::activation_gl>(d_x_routed_buffer),
+        .d_x = kittens::py::tensor_to_gl<globals::activation_gl>(d_x)
     };
-    kittens::py::launch_kernel<config_bwd_epilogue, globals_bwd_epilogue, bwd_epilogue_kernel>(g);
+    kittens::py::launch_kernel<config, globals, bwd_epilogue_kernel>(g);
     return d_x;
 }
+
+} // namespace bwd_epilogue
 
 namespace all_gather_top_experts {
 
@@ -227,7 +211,7 @@ struct globals {
     }
 };
 
-__device__ __forceinline__ void kernel(const globals &G) {
+__device__ __forceinline__ void all_gather_top_experts_kernel(const globals &G) {
     extern __shared__ int __shm[];
     tma_swizzle_allocator al((int*)&__shm[0]);
     int *shared = &al.allocate<int>();
@@ -242,7 +226,7 @@ __device__ __forceinline__ void kernel(const globals &G) {
     tma::store_async_wait();
 }
 
-static __host__ void entrypoint(
+static __host__ void all_gather_top_experts_entrypoint(
     const at::Tensor &top_experts,
     const at::Tensor &all_gather_top_experts_buffer,
     int64_t all_gather_top_experts_buffer_multicast_ptr,
@@ -259,7 +243,7 @@ static __host__ void entrypoint(
         .numel = numel,
         .chunk_bytes = chunk_bytes,
     };
-    kittens::py::launch_kernel<config, globals, kernel>(G);
+    kittens::py::launch_kernel<config, globals, all_gather_top_experts_kernel>(G);
 }
 
 } // namespace all_gather_top_experts
@@ -280,7 +264,7 @@ struct globals {
     uint32_t ep_size;
 };
 
-__device__ __forceinline__ void kernel(const globals &G) {
+__device__ __forceinline__ void barrier_all_kernel(const globals &G) {
     const uint32_t target = atomicAdd(G.target_ptr, G.ep_size) + G.ep_size;
 
     asm volatile("{multimem.red.release.sys.global.add.u32 [%0], 1;}" :: "l"(G.multicast_ptr) : "memory");
@@ -294,7 +278,7 @@ __device__ __forceinline__ void kernel(const globals &G) {
     asm volatile("{fence.acquire.sys;}" ::: "memory");
 }
 
-static __host__ void entrypoint(
+static __host__ void barrier_all_entrypoint(
     const at::Tensor &barrier_buffer,
     const std::vector<int64_t> &barrier_buffer_ptrs,
     int64_t barrier_buffer_multicast_ptr,
@@ -309,9 +293,32 @@ static __host__ void entrypoint(
         .target_ptr = reinterpret_cast<uint32_t *>(target_ptr),
         .ep_size = static_cast<uint32_t>(barrier_buffer_ptrs.size()),
     };
-    kittens::py::launch_kernel<config, globals, kernel>(G);
+    kittens::py::launch_kernel<config, globals, barrier_all_kernel>(G);
 }
 
 } // namespace barrier_all
+
+namespace zero_empty_routed_wgrads {
+
+struct globals {
+    uint16_t *d_w_routed_gate;
+    uint16_t *d_w_routed_up;
+    uint16_t *d_w_routed_down;
+    const int *tokens_per_expert;
+    const int64_t elements_per_expert;
+};
+
+static __global__ void zero_empty_routed_wgrads_kernel(const __grid_constant__ globals g) {
+    const int expert_idx = blockIdx.y;
+    if (g.tokens_per_expert[expert_idx] != 0) return;
+    const int64_t expert_offset = expert_idx * g.elements_per_expert;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < g.elements_per_expert; idx += gridDim.x * blockDim.x) {
+        g.d_w_routed_gate[expert_offset + idx] = 0;
+        g.d_w_routed_up[expert_offset + idx] = 0;
+        g.d_w_routed_down[expert_offset + idx] = 0;
+    }
+}
+
+} // namespace zero_empty_routed_wgrads
 
 } // namespace utils

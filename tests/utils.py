@@ -126,9 +126,9 @@ def generate_inputs(
     )
 
 
-def all_to_all(x: torch.Tensor, count: int, output_splits: list[int], input_splits: list[int]) -> torch.Tensor:
+def all_to_all(x: torch.Tensor, count: int, output_splits: list[int], input_splits: list[int], *, group: dist.ProcessGroup | None = None) -> torch.Tensor:
     output = x.new_empty((count, *x.shape[1:]))
-    dist.all_to_all_single(output, x, output_splits, input_splits)
+    dist.all_to_all_single(output, x, output_splits, input_splits, group=group)
     return output
 
 
@@ -353,6 +353,7 @@ def run_reference_bf16(
     swiglu_limit: float | None = None,
     *,
     activation: str = "swiglu",
+    group: dist.ProcessGroup | None = None,
 ) -> tuple[
     torch.Tensor,  # output
     torch.Tensor,  # d_x
@@ -364,8 +365,8 @@ def run_reference_bf16(
     torch.Tensor,  # d_w_shared_up
     torch.Tensor,  # d_w_shared_down
 ]:
-    world_size = dist.get_world_size()
-    rank = dist.get_rank()
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
 
     num_local_experts = w_routed_gate.shape[0]
     num_local_tokens, hidden = x.shape
@@ -378,14 +379,14 @@ def run_reference_bf16(
     dispatch_order = torch.argsort(destination_ranks, stable=True)
     send_counts = torch.bincount(destination_ranks, minlength=world_size)
     all_send_counts = torch.empty(world_size, world_size, dtype=torch.int64, device=x.device)
-    dist.all_gather_into_tensor(all_send_counts, send_counts)
+    dist.all_gather_into_tensor(all_send_counts, send_counts, group=group)
     send_splits = send_counts.tolist()
     recv_splits = all_send_counts[:, rank].tolist()
     num_recv = sum(recv_splits)
     send_x = x[dispatch_order // topk]
     send_local_experts = (topk_experts_flat[dispatch_order] % num_local_experts).contiguous()
-    recv_x = all_to_all(send_x, num_recv, recv_splits, send_splits).requires_grad_()
-    recv_local_experts = all_to_all(send_local_experts, num_recv, recv_splits, send_splits)
+    recv_x = all_to_all(send_x, num_recv, recv_splits, send_splits, group=group).requires_grad_()
+    recv_local_experts = all_to_all(send_local_experts, num_recv, recv_splits, send_splits, group=group)
 
     # Routed expert FFN
     w_routed_gate = w_routed_gate.detach().requires_grad_()
@@ -401,7 +402,7 @@ def run_reference_bf16(
         recv_output = recv_output.index_copy(0, rows, hidden_activations @ w_routed_down[expert_idx].T)
 
     # Routed token weighted sum
-    returned_output = all_to_all(recv_output.detach(), num_routes, send_splits, recv_splits)
+    returned_output = all_to_all(recv_output.detach(), num_routes, send_splits, recv_splits, group=group)
     flat_output = torch.empty_like(returned_output)
     flat_output[dispatch_order] = returned_output
     routed_output = (flat_output.view(num_local_tokens, topk, hidden).float() * router_weights.unsqueeze(2)).sum(1)
@@ -421,7 +422,7 @@ def run_reference_bf16(
     # Combine all-to-all
     d_flat_output = (d_output.unsqueeze(1).float() * router_weights.unsqueeze(2)).to(torch.bfloat16)
     d_send_output = d_flat_output.reshape(-1, hidden)[dispatch_order]
-    d_recv_output = all_to_all(d_send_output, num_recv, recv_splits, send_splits).contiguous()
+    d_recv_output = all_to_all(d_send_output, num_recv, recv_splits, send_splits, group=group).contiguous()
     d_recv_x, d_w_routed_gate, d_w_routed_up, d_w_routed_down = torch.autograd.grad(
         recv_output,
         (recv_x, w_routed_gate, w_routed_up, w_routed_down),
@@ -429,7 +430,7 @@ def run_reference_bf16(
     )
 
     # Backward
-    returned_d_x = all_to_all(d_recv_x, num_routes, send_splits, recv_splits)
+    returned_d_x = all_to_all(d_recv_x, num_routes, send_splits, recv_splits, group=group)
     flat_d_x = torch.empty_like(returned_d_x)
     flat_d_x[dispatch_order] = returned_d_x
     d_x_routed = flat_d_x.view(num_local_tokens, topk, hidden).float().sum(1)

@@ -12,6 +12,8 @@ from .ops import (
     bwd_epilogue,
     dispatch_mlp_swiglu_combine_bwd_mxfp8,
     dispatch_mlp_swiglu_combine_bwd_bf16,
+    recompute_forward_context_mxfp8,
+    recompute_forward_context_bf16,
     dispatch_mlp_swiglu_combine_fwd_mxfp8,
     dispatch_mlp_swiglu_combine_fwd_bf16,
     dispatch_mlp_situglu_combine_bwd_mxfp8,
@@ -157,8 +159,8 @@ def validate_workspace_args(
         raise RuntimeError("process group must have a nonempty group_name")
     ep_rank = dist.get_rank(group=group)
     ep_size = dist.get_world_size(group=group)
-    if ep_size not in (4, 8, 16, 32, 64):
-        raise ValueError("MoK EP size must be one of 4, 8, 16, 32, 64")
+    if ep_size not in (1, 4, 8, 16, 32, 64):
+        raise ValueError("MoK EP size must be one of 1, 4, 8, 16, 32, 64")
     if not 0 <= ep_rank < ep_size:
         raise RuntimeError("current process is not a member of the EP process group")
 
@@ -207,54 +209,47 @@ def create_workspace(
     gathered_shapes = gathered_shapes.view(ep_size, local_shape.numel())
     if not torch.all(gathered_shapes == local_shape).item():  # .item() here is fine since this is one-time setup
         raise ValueError("MoK requires identical token, hidden, and top-k shapes on every EP rank")
-    symm_mem.enable_symm_mem_for_group(group_name)
+    if ep_size > 1:
+        symm_mem.enable_symm_mem_for_group(group_name)
 
     schedule_capacity = num_local_tokens * topk * schedule_capacity_factor
 
-    x_buffer = symm_mem.empty(num_local_tokens, hidden_size, dtype=torch.bfloat16, device=device)
-    x_buffer_handle = symm_mem.rendezvous(x_buffer, group_name)
-    x_buffer_ptrs = [int(x_buffer_handle.buffer_ptrs[peer_rank]) for peer_rank in range(ep_size)]
+    def allocate_buffer(*shape: int, dtype: torch.dtype, zero: bool = False) -> tuple[torch.Tensor, Any, list[int]]:
+        if ep_size == 1:
+            if zero:
+                buffer = torch.zeros(*shape, dtype=dtype, device=device)
+            else:
+                buffer = torch.empty(*shape, dtype=dtype, device=device)
+            handle = None
+            ptrs = [int(buffer.data_ptr())]
+        else:
+            buffer = symm_mem.empty(*shape, dtype=dtype, device=device)
+            if zero:
+                buffer.zero_()
+            handle = symm_mem.rendezvous(buffer, group_name)
+            ptrs = [int(handle.buffer_ptrs[peer_rank]) for peer_rank in range(ep_size)]
+        return buffer, handle, ptrs
 
-    combine_buffer = symm_mem.empty(num_local_tokens * topk, hidden_size,
-                                    dtype=torch.bfloat16, device=device)
-    combine_buffer_handle = symm_mem.rendezvous(combine_buffer, group_name)
-    combine_buffer_ptrs = [int(combine_buffer_handle.buffer_ptrs[peer_rank])
-                           for peer_rank in range(ep_size)]
+    x_buffer, x_buffer_handle, x_buffer_ptrs = allocate_buffer(num_local_tokens, hidden_size, dtype=torch.bfloat16)
+    combine_buffer, combine_buffer_handle, combine_buffer_ptrs = allocate_buffer(num_local_tokens * topk, hidden_size, dtype=torch.bfloat16)
+    d_y_buffer, d_y_buffer_handle, d_y_buffer_ptrs = allocate_buffer(num_local_tokens, hidden_size, dtype=torch.bfloat16)
+    d_x_routed_buffer, d_x_routed_buffer_handle, d_x_routed_buffer_ptrs = allocate_buffer(num_local_tokens * topk, hidden_size, dtype=torch.bfloat16)
+    router_weight_buffer, router_weight_buffer_handle, router_weight_buffer_ptrs = allocate_buffer(num_local_tokens, topk, dtype=torch.float32)
+    d_router_weight_buffer, d_router_weight_buffer_handle, d_router_weight_buffer_ptrs = allocate_buffer(num_local_tokens, topk, dtype=torch.float32)
 
-    d_y_buffer = symm_mem.empty(num_local_tokens, hidden_size, dtype=torch.bfloat16, device=device)
-    d_y_buffer_handle = symm_mem.rendezvous(d_y_buffer, group_name)
-    d_y_buffer_ptrs = [int(d_y_buffer_handle.buffer_ptrs[peer_rank])
-                       for peer_rank in range(ep_size)]
+    all_gather_top_experts_buffer, all_gather_top_experts_buffer_handle, _ = allocate_buffer(ep_size, num_local_tokens, topk, dtype=torch.int32)
+    all_gather_top_experts_buffer_multicast_ptr = int(
+        all_gather_top_experts_buffer.data_ptr()
+        if all_gather_top_experts_buffer_handle is None
+        else all_gather_top_experts_buffer_handle.multicast_ptr
+    )
 
-    d_x_routed_buffer = symm_mem.empty(num_local_tokens * topk, hidden_size,
-                                      dtype=torch.bfloat16, device=device)
-    d_x_routed_buffer_handle = symm_mem.rendezvous(d_x_routed_buffer, group_name)
-    d_x_routed_buffer_ptrs = [int(d_x_routed_buffer_handle.buffer_ptrs[peer_rank])
-                              for peer_rank in range(ep_size)]
-
-    router_weight_buffer = symm_mem.empty(num_local_tokens, topk, dtype=torch.float32, device=device)
-    router_weight_buffer_handle = symm_mem.rendezvous(router_weight_buffer, group_name)
-    router_weight_buffer_ptrs = [int(router_weight_buffer_handle.buffer_ptrs[peer_rank])
-                                 for peer_rank in range(ep_size)]
-
-    d_router_weight_buffer = symm_mem.empty(num_local_tokens, topk,
-                                            dtype=torch.float32, device=device)
-    d_router_weight_buffer_handle = symm_mem.rendezvous(d_router_weight_buffer, group_name)
-    d_router_weight_buffer_ptrs = [int(d_router_weight_buffer_handle.buffer_ptrs[peer_rank])
-                                   for peer_rank in range(ep_size)]
-
-    all_gather_top_experts_buffer = symm_mem.empty(
-        ep_size, num_local_tokens, topk, dtype=torch.int32, device=device)
-    all_gather_top_experts_buffer_handle = symm_mem.rendezvous(all_gather_top_experts_buffer,
-                                                               group_name)
-    all_gather_top_experts_buffer_multicast_ptr = int(all_gather_top_experts_buffer_handle.multicast_ptr)
-
-    barrier_buffer = symm_mem.empty(1, dtype=torch.int32, device=device)
-    barrier_buffer.zero_()
-    barrier_buffer_handle = symm_mem.rendezvous(barrier_buffer, group_name)
-    barrier_buffer_ptrs = [int(barrier_buffer_handle.buffer_ptrs[peer_rank])
-                           for peer_rank in range(ep_size)]
-    barrier_buffer_multicast_ptr = int(barrier_buffer_handle.multicast_ptr)
+    barrier_buffer, barrier_buffer_handle, barrier_buffer_ptrs = allocate_buffer(1, dtype=torch.int32, zero=True)
+    barrier_buffer_multicast_ptr = int(
+        barrier_buffer.data_ptr()
+        if barrier_buffer_handle is None
+        else barrier_buffer_handle.multicast_ptr
+    )
     barrier_target = torch.zeros(1, dtype=torch.int32, device=device)
 
     dist.barrier(group=group, async_op=True, device_ids=[device_index]).block_current_stream()
@@ -443,7 +438,7 @@ def validate_inputs(
     workspace: MoKWorkspace,
     schedule: MoKSchedule,
     x: torch.Tensor,
-    router_weights: torch.Tensor,
+    router_weights: torch.Tensor | None = None,
     grad_output: torch.Tensor | None = None,
 ) -> None:
     """Validates runtime inputs against the workspace and schedule.
@@ -453,7 +448,7 @@ def validate_inputs(
         workspace:      MoKWorkspace
         schedule:       MoKSchedule
         x:              bfloat16 [num_local_tokens, hidden_size]
-        router_weights: float32 [num_local_tokens, topk]
+        router_weights: float32 [num_local_tokens, topk] | None
         grad_output:    bfloat16 [num_local_tokens, hidden_size] | None
 
     Outputs:
@@ -471,7 +466,8 @@ def validate_inputs(
     tensors = [("x", x, torch.bfloat16, expected_activation_shape)]
     if grad_output is not None:
         tensors.append(("grad_output", grad_output, torch.bfloat16, expected_activation_shape))
-    tensors.append(("router_weights", router_weights, torch.float32, (workspace.num_local_tokens, workspace.topk)))
+    if router_weights is not None:
+        tensors.append(("router_weights", router_weights, torch.float32, (workspace.num_local_tokens, workspace.topk)))
     for tensor_name, tensor, expected_dtype, expected_shape in tensors:
         if not tensor.is_cuda or tensor.device != workspace.device or tensor.dtype != expected_dtype or not tensor.is_contiguous():
             raise ValueError(f"{tensor_name} must be contiguous {expected_dtype} on the workspace CUDA device")
@@ -592,6 +588,90 @@ def forward(
                 workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
     output = fwd_epilogue(y_shared, workspace.combine_buffer, workspace.router_weight_buffer)
     return output, forward_context
+
+
+def recompute_forward_context(
+    config: MoKConfig,
+    workspace: MoKWorkspace,
+    schedule: MoKSchedule,
+    x: torch.Tensor,
+    shared_gate_weights: torch.Tensor,
+    shared_up_weights: torch.Tensor,
+    routed_gate_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    routed_up_weights: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    swiglu_limit: float | None = None,
+) -> MoKForwardContext:
+    """Recomputes the intermediates needed by the MoK backward pass.
+
+    Inputs:
+        config:              MoKConfig
+        workspace:           MoKWorkspace
+        schedule:            MoKSchedule
+        x:                   bfloat16 [num_local_tokens, hidden_size]
+        shared_gate_weights: bfloat16 [intermediate_size, hidden_size]
+        shared_up_weights:   bfloat16 [intermediate_size, hidden_size]
+        routed_gate_weights: bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 data/scale tuple
+        routed_up_weights:   bfloat16 [num_local_experts, intermediate_size, hidden_size] or MXFP8 data/scale tuple
+        swiglu_limit:        float | None
+
+    Outputs:
+        forward_context: MoKForwardContext
+    """
+    validate_inputs(config, workspace, schedule, x)
+    if config.activation != "swiglu":
+        raise ValueError("recompute_forward_context only supports the 'swiglu' activation")
+    if isinstance(routed_gate_weights, tuple) != isinstance(routed_up_weights, tuple):
+        raise TypeError("routed gate and up weights must use the same precision representation")
+    if isinstance(routed_gate_weights, tuple) and (len(routed_gate_weights) != 2 or len(routed_up_weights) != 2):
+        raise ValueError("MXFP8 routed gate and up weights must be data/scale pairs")
+
+    workspace.x_buffer.copy_(x)
+    barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
+                workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
+
+    if isinstance(routed_gate_weights, tuple):
+        routed_gate_weights_fp8, routed_gate_weights_sc = routed_gate_weights
+        routed_up_weights_fp8, routed_up_weights_sc = routed_up_weights
+        (x_fp8_t_routed, x_sc_t_routed,
+         gate_shared, gate_fp8_routed, gate_sc_routed,
+         up_shared, up_fp8_routed, up_sc_routed,
+         hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed) = recompute_forward_context_mxfp8(
+            workspace.x_buffer, workspace.x_buffer_ptrs,
+            shared_gate_weights, routed_gate_weights_fp8, routed_gate_weights_sc,
+            shared_up_weights, routed_up_weights_fp8, routed_up_weights_sc,
+            schedule.peer_rank, schedule.peer_token_idx,
+            schedule.num_tokens, schedule.tokens_per_expert,
+            workspace.topk, swiglu_limit, config.fwd_num_comm_sms,
+            config.macrobatch_size, config.minibatch_size,
+        )
+        x_routed = (x_fp8_t_routed, x_sc_t_routed)
+        gate_routed = (gate_fp8_routed, gate_sc_routed)
+        up_routed = (up_fp8_routed, up_sc_routed)
+        hidden_routed = (hidden_fp8_t_routed, hidden_sc_t_routed)
+    else:
+        (x_routed, gate_shared, gate_routed, up_shared, up_routed,
+         hidden_shared, hidden_routed) = recompute_forward_context_bf16(
+            workspace.x_buffer, workspace.x_buffer_ptrs,
+            shared_gate_weights, routed_gate_weights,
+            shared_up_weights, routed_up_weights,
+            schedule.peer_rank, schedule.peer_token_idx,
+            schedule.num_tokens, schedule.tokens_per_expert,
+            workspace.topk, swiglu_limit, config.fwd_num_comm_sms,
+            config.macrobatch_size, config.minibatch_size,
+        )
+
+    barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
+                workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
+    return MoKForwardContext(
+        x_routed=x_routed,
+        gate_shared=gate_shared,
+        gate_routed=gate_routed,
+        up_shared=up_shared,
+        up_routed=up_routed,
+        hidden_shared=hidden_shared,
+        hidden_routed=hidden_routed,
+        activation=config.activation,
+    )
 
 
 def backward(

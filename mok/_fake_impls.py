@@ -157,6 +157,84 @@ def _dispatch_mlp_swiglu_combine_fwd_bf16_fake(
     )
 
 
+@torch.library.register_fake("mok::recompute_forward_context_mxfp8")
+def _recompute_forward_context_mxfp8_fake(
+    x: torch.Tensor,
+    x_ptrs: list[int],
+    w_shared_gate: torch.Tensor,
+    w_routed_gate: torch.Tensor,
+    w_routed_gate_sc: torch.Tensor,
+    w_shared_up: torch.Tensor,
+    w_routed_up: torch.Tensor,
+    w_routed_up_sc: torch.Tensor,
+    schedule_peer_rank: torch.Tensor,
+    schedule_peer_token_idx: torch.Tensor,
+    num_tokens: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    topk: int,
+    swiglu_limit: float | None,
+    num_comm_sms: int,
+    macrobatch_size: int,
+    minibatch_size: int,
+) -> tuple[
+    torch.Tensor, torch.Tensor,  # x_fp8_t_routed, x_sc_t_routed
+    torch.Tensor, torch.Tensor, torch.Tensor,  # gate_shared, gate_fp8_routed, gate_sc_routed
+    torch.Tensor, torch.Tensor, torch.Tensor,  # up_shared, up_fp8_routed, up_sc_routed
+    torch.Tensor, torch.Tensor, torch.Tensor,  # hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed
+]:
+    num_local_tokens, hidden_size = x.shape
+    intermediate_size = w_shared_gate.shape[0]
+    return (
+        x.new_empty((hidden_size, macrobatch_size), dtype=torch.float8_e4m3fn),
+        x.new_empty((hidden_size // 128, macrobatch_size // 128, 32, 16), dtype=torch.uint8),
+        x.new_empty((num_local_tokens, intermediate_size)),
+        x.new_empty((macrobatch_size, intermediate_size), dtype=torch.float8_e4m3fn),
+        x.new_empty((macrobatch_size // 128, intermediate_size // 128, 32, 16), dtype=torch.uint8),
+        x.new_empty((num_local_tokens, intermediate_size)),
+        x.new_empty((macrobatch_size, intermediate_size), dtype=torch.float8_e4m3fn),
+        x.new_empty((macrobatch_size // 128, intermediate_size // 128, 32, 16), dtype=torch.uint8),
+        x.new_empty((num_local_tokens, intermediate_size)),
+        x.new_empty((intermediate_size, macrobatch_size), dtype=torch.float8_e4m3fn),
+        x.new_empty((intermediate_size // 128, macrobatch_size // 128, 32, 16), dtype=torch.uint8),
+    )
+
+
+@torch.library.register_fake("mok::recompute_forward_context_bf16")
+def _recompute_forward_context_bf16_fake(
+    x: torch.Tensor,
+    x_ptrs: list[int],
+    w_shared_gate: torch.Tensor,
+    w_routed_gate: torch.Tensor,
+    w_shared_up: torch.Tensor,
+    w_routed_up: torch.Tensor,
+    schedule_peer_rank: torch.Tensor,
+    schedule_peer_token_idx: torch.Tensor,
+    num_tokens: torch.Tensor,
+    tokens_per_expert: torch.Tensor,
+    topk: int,
+    swiglu_limit: float | None,
+    num_comm_sms: int,
+    macrobatch_size: int,
+    minibatch_size: int,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor,
+    torch.Tensor, torch.Tensor,
+]:
+    num_local_tokens, hidden_size = x.shape
+    intermediate_size = w_shared_gate.shape[0]
+    return (
+        x.new_empty((macrobatch_size, hidden_size)),
+        x.new_empty((num_local_tokens, intermediate_size)),
+        x.new_empty((macrobatch_size, intermediate_size)),
+        x.new_empty((num_local_tokens, intermediate_size)),
+        x.new_empty((macrobatch_size, intermediate_size)),
+        x.new_empty((num_local_tokens, intermediate_size)),
+        x.new_empty((macrobatch_size, intermediate_size)),
+    )
+
+
 @torch.library.register_fake("mok::dispatch_mlp_swiglu_combine_bwd_mxfp8")
 def _dispatch_mlp_swiglu_combine_bwd_mxfp8_fake(
     d_y_buffer: torch.Tensor,

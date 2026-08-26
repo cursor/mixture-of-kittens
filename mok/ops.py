@@ -286,8 +286,8 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
-    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
-        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit <= 0):
+        raise ValueError("swiglu_limit must be None or a positive number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if (type(minibatch_size) is not int or minibatch_size <= 0
@@ -457,8 +457,8 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     num_local_experts = w_routed_gate.shape[0]
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
-    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
-        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit <= 0):
+        raise ValueError("swiglu_limit must be None or a positive number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0:
@@ -595,8 +595,8 @@ def recompute_forward_context_mxfp8(
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
-    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
-        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit <= 0):
+        raise ValueError("swiglu_limit must be None or a positive number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if (type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0):
@@ -736,8 +736,8 @@ def recompute_forward_context_bf16(
     num_local_experts = w_routed_gate.shape[0]
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
-    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
-        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit <= 0):
+        raise ValueError("swiglu_limit must be None or a positive number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0:
@@ -929,8 +929,8 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
-    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
-        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit <= 0):
+        raise ValueError("swiglu_limit must be None or a positive number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if (type(minibatch_size) is not int or minibatch_size <= 0
@@ -1200,8 +1200,8 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     num_local_experts = w_routed_gate.shape[0]
     if type(topk) is not int or not 0 < topk <= 255:
         raise ValueError("topk must be an integer in [1, 255]")
-    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit < 0):
-        raise ValueError("swiglu_limit must be None or a non-negative number")
+    if swiglu_limit is not None and (type(swiglu_limit) not in (int, float) or swiglu_limit <= 0):
+        raise ValueError("swiglu_limit must be None or a positive number")
     if type(num_comm_sms) is not int or num_comm_sms <= 0 or num_comm_sms % 2 != 0:
         raise ValueError("num_comm_sms must be a positive even integer")
     if type(minibatch_size) is not int or minibatch_size <= 0 or minibatch_size % 256 != 0:

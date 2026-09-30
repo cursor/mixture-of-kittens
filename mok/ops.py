@@ -1320,6 +1320,9 @@ def bwd_epilogue(
 ) -> torch.Tensor:
     """Combines shared and routed input gradients.
 
+    topk is inferred as d_x_routed_buffer rows / num_local_tokens, so pass exactly the leading
+    num_local_tokens * topk rows of a capacity-sized buffer, not the whole buffer.
+
     Inputs:
         d_x_shared:        bfloat16 [num_local_tokens, hidden_size]
         d_x_routed_buffer: bfloat16 [num_local_tokens * topk, hidden_size]

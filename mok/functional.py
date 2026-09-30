@@ -37,7 +37,7 @@ class MoKSchedule:
     peer_token_idx: torch.Tensor     # (schedule_capacity,) int32
     num_tokens: torch.Tensor         # (1,) int32
     tokens_per_expert: torch.Tensor  # (num_local_experts,) int32
-    num_local_tokens: int | None = None  # () this rank's routed rows; None skips the row-count check
+    num_local_tokens: int | None = None  # () rows the schedule was built from; None means the workspace capacity
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,7 +467,8 @@ def validate_inputs(
     num_local_tokens = x.shape[0] if x.ndim == 2 else -1
     if not 0 <= num_local_tokens <= workspace.num_local_tokens:
         raise ValueError("x must have shape (num_local_tokens, hidden_size) within the workspace capacity")
-    if schedule.num_local_tokens is not None and num_local_tokens != schedule.num_local_tokens:
+    schedule_rows = workspace.num_local_tokens if schedule.num_local_tokens is None else schedule.num_local_tokens
+    if num_local_tokens != schedule_rows:
         raise ValueError("x must have as many rows as the top_experts the schedule was built from")
     expected_activation_shape = (num_local_tokens, workspace.hidden_size)
     tensors = [("x", x, torch.bfloat16, expected_activation_shape)]

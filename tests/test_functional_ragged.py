@@ -252,6 +252,15 @@ def test_ragged_input_validation(context: tuple[int, int, torch.device]) -> None
         ("rows beyond capacity", {"x": x, "router_weights": router_weights}),
         ("rows differ from the schedule", {"x": x[:num_rows - 1], "router_weights": router_weights[:num_rows - 1]}),
         ("router weight rows differ from x", {"router_weights": router_weights[:num_rows - 1]}),
+        (
+            "rows differ from a schedule without a row count, which means capacity",
+            {"schedule": functional.MoKSchedule(
+                peer_rank=schedule.peer_rank,
+                peer_token_idx=schedule.peer_token_idx,
+                num_tokens=schedule.num_tokens,
+                tokens_per_expert=schedule.tokens_per_expert,
+            )},
+        ),
     ):
         try:
             functional.forward(**(valid_kwargs | overrides))

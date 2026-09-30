@@ -41,6 +41,12 @@ struct config {
     static constexpr int DYNAMIC_SHARED_MEMORY = MAX_SHARED_MEMORY - 1024;
 };
 
+// Shared-expert tasks cover the local tokens in whole MLP_Mb row blocks. The shared tensors have exactly
+// num_local_tokens rows, so TMA zero-fills loads and clips stores past the last token of a partial block.
+__host__ __device__ static inline int num_shared_row_blocks(const int num_local_tokens) {
+    return (num_local_tokens + config::MLP_Mb - 1) / config::MLP_Mb;
+}
+
 // Grouped GEMM tiles
 using mlp_fp8_tile = st_fp8e4m3<config::MLP_Mb / 2, config::MLP_FP8_Kb>;
 using mlp_bf16_tile = st_bf<config::MLP_Mb / 2, config::MLP_BF16_Kb>;
@@ -105,8 +111,8 @@ struct globals_fwd {
     epi_bf16_gl y_shared;                     // (num_local_tokens, H) down GEMM D
     epi_bf16_gl y_routed;                     // (macrobatch_size, H) down GEMM D + combine
 
-    activation_bf16_pgl x_routed_send_buffer; // (num_local_tokens, H)
-    activation_bf16_pgl y_routed_recv_buffer; // (num_local_tokens * topk, H)
+    activation_bf16_pgl x_routed_send_buffer; // (token_capacity, H)
+    activation_bf16_pgl y_routed_recv_buffer; // (token_capacity * topk, H)
 
     weight_bf16_gl w_shared_gate;             // (I, H)
     routed_weight_gl w_routed_gate;           // (num_local_experts, I, H)
@@ -129,6 +135,7 @@ struct globals_fwd {
     index_gl y_routed_ready;                  // (num_minibatches,) routed down -> dispatch/combine
     index_gl y_routed_done;                   // (num Down CTA output tiles,) combine -> next routed down
 
+    const int num_local_tokens;               // this rank's token count; zero-row shared tensors are one-row placeholders
     const int topk;
     const float swiglu_limit;
     const int num_comm_sms;
@@ -137,11 +144,11 @@ struct globals_fwd {
 
     __host__ inline dim3 grid() const {
         const int num_minibatches = (schedule_peer_rank.cols() + minibatch_size - 1) / minibatch_size; // across all macrobatches
-        const int shared_row_blocks = x_shared.rows() / config::MLP_Mb;
+        const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
         const int minibatch_routed_row_blocks = minibatch_size / config::MLP_Mb;
         const int shared_gate_up_tasks = shared_row_blocks * (w_shared_gate.rows() / config::MLP_Nb);
         const int minibatch_routed_gate_up_tasks = minibatch_routed_row_blocks * (w_routed_gate.rows() / config::MLP_Nb);
-        const int shared_swiglu_tiles = (hidden_shared.rows() / config::SWIGLU_Mb) * (hidden_shared.cols() / config::SWIGLU_Nb);
+        const int shared_swiglu_tiles = shared_row_blocks * (config::MLP_Mb / config::SWIGLU_Mb) * (hidden_shared.cols() / config::SWIGLU_Nb);
         const int minibatch_routed_swiglu_tiles = (minibatch_size / config::SWIGLU_Mb) * (hidden_fp8_routed.cols() / config::SWIGLU_Nb);
         const int shared_swiglu_tasks = (shared_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH);
         const int minibatch_routed_swiglu_tasks = (minibatch_routed_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH);
@@ -196,11 +203,11 @@ struct globals_bwd {
     epi_bf16_gl d_x_routed;                               // (macrobatch_size, H) dgrad gate/up out + reverse-dispatch in
 
     // Symmetric buffers
-    activation_bf16_pgl x_routed_send_buffer;             // (num_local_tokens, H)
-    activation_bf16_pgl d_y_buffer;                       // (num_local_tokens, H)
-    activation_bf16_pgl d_x_routed_buffer;                // (num_local_tokens * topk, H)
-    router_weight_pgl router_weight_buffer;               // (num_local_tokens, topk)
-    router_weight_pgl d_router_weight_buffer;             // (num_local_tokens, topk)
+    activation_bf16_pgl x_routed_send_buffer;             // (token_capacity, H)
+    activation_bf16_pgl d_y_buffer;                       // (token_capacity, H)
+    activation_bf16_pgl d_x_routed_buffer;                // (token_capacity * topk, H)
+    router_weight_pgl router_weight_buffer;               // (token_capacity, topk)
+    router_weight_pgl d_router_weight_buffer;             // (token_capacity, topk)
 
     // Router (locally staged)
     router_weight_gl router_weights;                      // (macrobatch_size,)
@@ -246,6 +253,7 @@ struct globals_bwd {
     index_gl replayed_hidden_ready;                       // (routed row blocks,) replayed swiglu -> wgrad down
     index_gl routed_buffers_done;                         // (num_macrobatches,) current macrobatch -> next macrobatch
 
+    const int num_local_tokens;               // this rank's token count; zero-row shared tensors are one-row placeholders
     const int topk;
     const float swiglu_limit;
     const int num_comm_sms;
@@ -256,11 +264,11 @@ struct globals_bwd {
         const int capacity = schedule_peer_rank.cols();
         const int num_minibatches = (capacity + minibatch_size - 1) / minibatch_size; // across all macrobatches
         const int num_macrobatches = (capacity + macrobatch_size - 1) / macrobatch_size;
-        const int shared_row_blocks = d_y_shared.rows() / config::MLP_Mb;
+        const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
         const int minibatch_row_blocks = minibatch_size / config::MLP_Mb;
         const int intermediate_dim_col_blocks = hidden_shared.cols() / config::MLP_Nb;
         const int hidden_dim_col_blocks = d_y_shared.cols() / config::MLP_Nb;
-        const int shared_swiglu_bwd_tiles = (hidden_shared.rows() / config::SWIGLU_Mb) * (hidden_shared.cols() / config::SWIGLU_Nb);
+        const int shared_swiglu_bwd_tiles = shared_row_blocks * (config::MLP_Mb / config::SWIGLU_Mb) * (hidden_shared.cols() / config::SWIGLU_Nb);
         const int minibatch_swiglu_tiles = (minibatch_size / config::SWIGLU_Mb) * (hidden_fp8_routed.cols() / config::SWIGLU_Nb);
         const int shared_swiglu_bwd_tasks = (shared_swiglu_bwd_tiles + config::CLUSTER_SIZE * config::SWIGLU_BWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_BWD_PIPE_DEPTH);
         const int minibatch_swiglu_bwd_tasks = (minibatch_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_BWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_BWD_PIPE_DEPTH);
@@ -296,7 +304,7 @@ struct globals_recompute_forward_context {
     routed_sc_gl hidden_sc_t_routed;          // MXFP8 only: (I / 128, macrobatch_size / 128, 32, 16)
 
     // Symmetric buffers
-    activation_bf16_pgl x_routed_send_buffer; // (num_local_tokens, H)
+    activation_bf16_pgl x_routed_send_buffer; // (token_capacity, H)
 
     // Weights
     weight_bf16_gl w_shared_gate;             // (I, H)
@@ -317,6 +325,7 @@ struct globals_recompute_forward_context {
     index_gl hidden_row_block_ready;          // (shared_row_blocks + routed_row_blocks,)
     index_gl x_routed_ready;                  // (num_minibatches,)
 
+    const int num_local_tokens;               // this rank's token count; zero-row shared tensors are one-row placeholders
     const int topk;
     const float swiglu_limit;
     const int num_comm_sms;
@@ -326,11 +335,11 @@ struct globals_recompute_forward_context {
     __host__ inline dim3 grid() const {
         const int routed_capacity = min(schedule_peer_rank.cols(), macrobatch_size);
         const int num_minibatches = (routed_capacity + minibatch_size - 1) / minibatch_size;
-        const int shared_row_blocks = x_shared.rows() / config::MLP_Mb;
+        const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
         const int minibatch_routed_row_blocks = minibatch_size / config::MLP_Mb;
         const int shared_gate_up_tasks = shared_row_blocks * (w_shared_gate.rows() / config::MLP_Nb);
         const int minibatch_routed_gate_up_tasks = minibatch_routed_row_blocks * (w_routed_gate.rows() / config::MLP_Nb);
-        const int shared_swiglu_tiles = (hidden_shared.rows() / config::SWIGLU_Mb) * (hidden_shared.cols() / config::SWIGLU_Nb);
+        const int shared_swiglu_tiles = shared_row_blocks * (config::MLP_Mb / config::SWIGLU_Mb) * (hidden_shared.cols() / config::SWIGLU_Nb);
         const int minibatch_routed_swiglu_tiles = (minibatch_size / config::SWIGLU_Mb) * (hidden_fp8_routed.cols() / config::SWIGLU_Nb);
         const int shared_swiglu_tasks = (shared_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH);
         const int minibatch_routed_swiglu_tasks = (minibatch_routed_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH);

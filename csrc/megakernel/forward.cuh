@@ -2,11 +2,11 @@ template <bool IS_CLAMPED>
 static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(const globals_fwd &g) {
     int cluster_idx = clusterIdx().x;
     const int cta_rank = cluster_ctarank();
-    const int shared_row_blocks = g.x_shared.rows() / config::MLP_Mb;
+    const int shared_row_blocks = num_shared_row_blocks(g.num_local_tokens);
     const int minibatch_routed_row_blocks = g.minibatch_size / config::MLP_Mb;
     const int shared_gate_up_tasks = shared_row_blocks * (g.w_shared_gate.rows() / config::MLP_Nb);
     const int minibatch_routed_gate_up_tasks = minibatch_routed_row_blocks * (g.w_routed_gate.rows() / config::MLP_Nb);
-    const int shared_swiglu_tiles = (g.hidden_shared.rows() / config::SWIGLU_Mb) * (g.hidden_shared.cols() / config::SWIGLU_Nb);
+    const int shared_swiglu_tiles = shared_row_blocks * (config::MLP_Mb / config::SWIGLU_Mb) * (g.hidden_shared.cols() / config::SWIGLU_Nb);
     const int minibatch_routed_swiglu_tiles = (g.minibatch_size / config::SWIGLU_Mb) * (g.hidden_fp8_routed.cols() / config::SWIGLU_Nb);
     const int shared_swiglu_tasks = (shared_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH);
     const int minibatch_routed_swiglu_tasks = (minibatch_routed_swiglu_tiles + config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_FWD_PIPE_DEPTH);
@@ -164,7 +164,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
                                       g.tokens_per_expert, nullptr, nullptr, nullptr, &g.gate_up_tile_ready, nullptr, nullptr,
                                       d_tt, a_sc_tt, b_sc_tt,
                                       gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                      g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                       0, 0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_gate_up_tasks * 2) {
             // Shared up (BF16)
@@ -174,7 +174,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
                                       g.tokens_per_expert, nullptr, nullptr, nullptr, &g.gate_up_tile_ready, nullptr, nullptr,
                                       d_tt, a_sc_tt, b_sc_tt,
                                       gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                      g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                       0, 0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_gate_up_tasks * 2 + shared_swiglu_tasks) {
             // Shared Swiglu (BF16)
@@ -182,7 +182,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
             swiglu_fwd_kernel<true, IS_CLAMPED>(g.gate_shared, g.up_shared, g.hidden_shared, nullptr, nullptr, nullptr,
                              g.gate_up_tile_ready, g.hidden_row_block_ready,
                              swiglu_inputs_arrived, swiglu_bitfield,
-                             g.x_shared.rows(), g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                             shared_row_blocks * config::MLP_Mb, g.swiglu_limit, macrobatch_size, g.minibatch_size,
                              0, 0, task_idx, cta_rank, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_tasks) {
             // Shared down (BF16)
@@ -192,7 +192,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_fwd_kernel(co
                                       g.tokens_per_expert, nullptr, &g.hidden_row_block_ready, nullptr, nullptr, nullptr, nullptr,
                                       d_tt, a_sc_tt, b_sc_tt,
                                       gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                      g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                       0, 0, hidden_row_block_ready_required_count, 0, 0, smem_base_addr);
         } else {
             // Routed expert with macro/minibatching
@@ -330,7 +330,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
     const int intermediate_dim = w_shared_gate.size(0);
     const int num_global_minibatches = (schedule_capacity + minibatch_size - 1) / minibatch_size;
     const int num_global_row_blocks = schedule_capacity / (config::MLP_Mb / config::CLUSTER_SIZE);
-    const int shared_row_blocks = num_local_tokens / config::MLP_Mb;
+    const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
     const int routed_row_blocks = schedule_capacity / config::MLP_Mb;
     const int shared_gate_up_tasks = shared_row_blocks * (w_shared_gate.size(0) / config::MLP_Nb);
     const int routed_gate_up_tasks = routed_row_blocks * (w_routed_gate.size(1) / config::MLP_Nb);
@@ -368,25 +368,25 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
     at::Tensor y_routed_done = at::zeros({num_global_row_blocks}, tokens_per_expert.options());
 
     globals_fwd g {
-        .x_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(x),
+        .x_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(x)),
         .x_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(x_fp8_routed),
         .x_sc_routed = kittens::py::tensor_to_gl<sc_gl>(x_sc_routed),
         .x_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(x_fp8_t_routed),
         .x_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(x_sc_t_routed),
-        .gate_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(gate_shared),
+        .gate_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(gate_shared)),
         .gate_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(gate_routed),
         .gate_fp8_routed = kittens::py::tensor_to_gl<gate_up_fp8_gl>(gate_fp8_routed),
         .gate_sc_routed = kittens::py::tensor_to_gl<sc_gl>(gate_sc_routed),
-        .up_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(up_shared),
+        .up_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(up_shared)),
         .up_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(up_routed),
         .up_fp8_routed = kittens::py::tensor_to_gl<gate_up_fp8_gl>(up_fp8_routed),
         .up_sc_routed = kittens::py::tensor_to_gl<sc_gl>(up_sc_routed),
-        .hidden_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(hidden_shared),
+        .hidden_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(hidden_shared)),
         .hidden_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(hidden_fp8_routed),
         .hidden_sc_routed = kittens::py::tensor_to_gl<sc_gl>(hidden_sc_routed),
         .hidden_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(hidden_fp8_t_routed),
         .hidden_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(hidden_sc_t_routed),
-        .y_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(y_shared),
+        .y_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(y_shared)),
         .y_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(y_routed),
         .x_routed_send_buffer = x_routed_send_buffer_data,
         .y_routed_recv_buffer = y_routed_recv_buffer_data,
@@ -408,6 +408,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8(
         .x_routed_ready = kittens::py::tensor_to_gl<index_gl>(x_routed_ready),
         .y_routed_ready = kittens::py::tensor_to_gl<index_gl>(y_routed_ready),
         .y_routed_done = kittens::py::tensor_to_gl<index_gl>(y_routed_done),
+        .num_local_tokens = num_local_tokens,
         .topk = topk,
         .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,
@@ -457,7 +458,7 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
     const int intermediate_dim = w_shared_gate.size(0);
     const int num_global_minibatches = (schedule_capacity + minibatch_size - 1) / minibatch_size;
     const int num_global_row_blocks = schedule_capacity / (config::MLP_Mb / config::CLUSTER_SIZE);
-    const int shared_row_blocks = num_local_tokens / config::MLP_Mb;
+    const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
     const int routed_row_blocks = schedule_capacity / config::MLP_Mb;
     const int shared_gate_up_tasks = shared_row_blocks * (intermediate_dim / config::MLP_Nb);
     const int routed_gate_up_tasks = routed_row_blocks * (intermediate_dim / config::MLP_Nb);
@@ -485,25 +486,25 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
     at::Tensor y_routed_done = at::zeros({num_global_row_blocks}, tokens_per_expert.options());
 
     globals_fwd g {
-        .x_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(x),
+        .x_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(x)),
         .x_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(x_routed),
         .x_sc_routed = {},
         .x_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(x_routed),
         .x_sc_t_routed = {},
-        .gate_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(gate_shared),
+        .gate_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(gate_shared)),
         .gate_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(gate_routed),
         .gate_fp8_routed = kittens::py::tensor_to_gl<routed_gate_up_gl>(gate_routed),
         .gate_sc_routed = {},
-        .up_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(up_shared),
+        .up_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(up_shared)),
         .up_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(up_routed),
         .up_fp8_routed = kittens::py::tensor_to_gl<routed_gate_up_gl>(up_routed),
         .up_sc_routed = {},
-        .hidden_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(hidden_shared),
+        .hidden_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(hidden_shared)),
         .hidden_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(hidden_routed),
         .hidden_sc_routed = {},
         .hidden_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(hidden_routed),
         .hidden_sc_t_routed = {},
-        .y_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(y_shared),
+        .y_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(y_shared)),
         .y_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(y_routed),
         .x_routed_send_buffer = x_routed_send_buffer_data,
         .y_routed_recv_buffer = y_routed_recv_buffer_data,
@@ -525,6 +526,7 @@ dispatch_mlp_swiglu_combine_fwd_bf16(
         .x_routed_ready = kittens::py::tensor_to_gl<index_gl>(x_routed_ready),
         .y_routed_ready = kittens::py::tensor_to_gl<index_gl>(y_routed_ready),
         .y_routed_done = kittens::py::tensor_to_gl<index_gl>(y_routed_done),
+        .num_local_tokens = num_local_tokens,
         .topk = topk,
         .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,

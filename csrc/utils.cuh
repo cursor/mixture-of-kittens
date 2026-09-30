@@ -32,7 +32,7 @@ struct globals {
 
     __host__ inline dim3 grid() const {
         const int col_blocks = (y_shared.cols() + Nb - 1) / Nb;
-        const int token_blocks = y_shared.rows() / TOKENS_PER_CTA;
+        const int token_blocks = (y_shared.rows() + TOKENS_PER_CTA - 1) / TOKENS_PER_CTA;
         return dim3(col_blocks * token_blocks);
     }
     __host__ inline int dynamic_shared_memory() const {
@@ -50,6 +50,7 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals &g) {
     const int col_blocks = (g.y_shared.cols() + globals::Nb - 1) / globals::Nb;
     const int col_block_idx = blockIdx.x % col_blocks;
     const int first_token_idx = blockIdx.x / col_blocks * TOKENS_PER_CTA;
+    const int num_stages = min(TOKENS_PER_CTA, g.y_shared.rows() - first_token_idx); // an odd token count leaves one token in the last CTA
 
     extern __shared__ int __shm[];
     auto *token_vecs = reinterpret_cast<globals::token_vec*>((reinterpret_cast<uint64_t>(&__shm[0]) + 1023) & ~uint64_t(1023));
@@ -60,16 +61,19 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals &g) {
         #pragma unroll
         for (int stage = 0; stage < TOKENS_PER_CTA; ++stage) {
             init_semaphore(inputs_arrived[stage], 0, 1);
-            tma::expect_bytes(inputs_arrived[stage], num_tokens_per_stage * sizeof(globals::token_vec));
+            if (stage < num_stages)
+                tma::expect_bytes(inputs_arrived[stage], num_tokens_per_stage * sizeof(globals::token_vec));
         }
     }
-    for (int i = tid; i < TOKENS_PER_CTA * topk; i += blockDim.x)
+    for (int i = tid; i < num_stages * topk; i += blockDim.x)
         weights[i] = g.topk_weights[{first_token_idx + i / topk, i % topk}];
     __syncthreads();
 
     #pragma unroll
     for (int stage = 0; stage < TOKENS_PER_CTA; ++stage) {
         const int token_idx = first_token_idx + stage;
+        if (stage >= num_stages)
+            break;
         if (tid == 0)
             tma::load_async(token_vecs[stage * num_tokens_per_stage], g.y_shared, {token_idx, col_block_idx}, inputs_arrived[stage]);
         else if (tid < num_tokens_per_stage)
@@ -78,6 +82,8 @@ static __device__ __forceinline__ void fwd_epilogue_kernel(const globals &g) {
 
     #pragma unroll
     for (int stage = 0; stage < TOKENS_PER_CTA; ++stage) {
+        if (stage >= num_stages)
+            break;
         globals::token_vec *stage_vecs = token_vecs + stage * num_tokens_per_stage;
         rv_fl<globals::Nb / config::NUM_WARPS> accumulator, term;
         wait(inputs_arrived[stage], 0);
@@ -100,6 +106,7 @@ static __host__ at::Tensor fwd_epilogue_entrypoint(
     const at::Tensor &topk_weights
 ) {
     at::Tensor output = at::empty_like(y_shared);
+    if (y_shared.size(0) == 0) return output;
     globals g {
         .y_shared = kittens::py::tensor_to_gl<globals::activation_gl>(y_shared),
         .combine_buffer = kittens::py::tensor_to_gl<globals::activation_gl>(combine_buffer),
@@ -177,6 +184,7 @@ static __device__ __forceinline__ void bwd_epilogue_kernel(const globals &g) {
 
 static __host__ at::Tensor bwd_epilogue_entrypoint(const at::Tensor &d_x_shared, const at::Tensor &d_x_routed_buffer) {
     at::Tensor d_x = at::empty_like(d_x_shared);
+    if (d_x_shared.size(0) == 0) return d_x;
     globals g {
         .d_x_shared = kittens::py::tensor_to_gl<globals::activation_gl>(d_x_shared),
         .d_x_routed_buffer = kittens::py::tensor_to_gl<globals::activation_gl>(d_x_routed_buffer),

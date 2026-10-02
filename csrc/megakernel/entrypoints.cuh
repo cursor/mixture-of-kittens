@@ -5,6 +5,7 @@
 
 #include "megakernel.cuh"
 
+template <GluActivation ACTIVATION>
 static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor>
@@ -43,7 +44,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
 
     switch (num_devices) {
         case 1:
-            return dispatch_mlp_swiglu_combiner<1>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<1, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_routed_gate_sc,
                 w_shared_up, w_routed_up, w_routed_up_sc,
@@ -51,7 +52,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 4:
-            return dispatch_mlp_swiglu_combiner<4>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<4, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_routed_gate_sc,
                 w_shared_up, w_routed_up, w_routed_up_sc,
@@ -59,7 +60,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
-            return dispatch_mlp_swiglu_combiner<8>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<8, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_routed_gate_sc,
                 w_shared_up, w_routed_up, w_routed_up_sc,
@@ -67,7 +68,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
-            return dispatch_mlp_swiglu_combiner<16>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<16, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_routed_gate_sc,
                 w_shared_up, w_routed_up, w_routed_up_sc,
@@ -75,7 +76,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
-            return dispatch_mlp_swiglu_combiner<32>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<32, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_routed_gate_sc,
                 w_shared_up, w_routed_up, w_routed_up_sc,
@@ -83,7 +84,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
-            return dispatch_mlp_swiglu_combiner<64>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<64, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_mxfp8(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_routed_gate_sc,
                 w_shared_up, w_routed_up, w_routed_up_sc,
@@ -96,6 +97,7 @@ dispatch_mlp_swiglu_combine_fwd_mxfp8_entrypoint(
     }
 }
 
+template <GluActivation ACTIVATION>
 static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor, at::Tensor>
 dispatch_mlp_swiglu_combine_fwd_bf16_entrypoint(
@@ -122,37 +124,37 @@ dispatch_mlp_swiglu_combine_fwd_bf16_entrypoint(
     const int num_devices = static_cast<int>(x_ptrs.size());
     switch (num_devices) {
         case 1:
-            return dispatch_mlp_swiglu_combiner<1, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
+            return dispatch_mlp_swiglu_combiner<1, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 4:
-            return dispatch_mlp_swiglu_combiner<4, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
+            return dispatch_mlp_swiglu_combiner<4, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
-            return dispatch_mlp_swiglu_combiner<8, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
+            return dispatch_mlp_swiglu_combiner<8, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
-            return dispatch_mlp_swiglu_combiner<16, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
+            return dispatch_mlp_swiglu_combiner<16, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
-            return dispatch_mlp_swiglu_combiner<32, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
+            return dispatch_mlp_swiglu_combiner<32, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
-            return dispatch_mlp_swiglu_combiner<64, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_fwd_bf16(
+            return dispatch_mlp_swiglu_combiner<64, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_fwd_bf16(
                 x, x_ptrs, combine_buffer, combine_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
@@ -163,6 +165,7 @@ dispatch_mlp_swiglu_combine_fwd_bf16_entrypoint(
     }
 }
 
+template <GluActivation ACTIVATION>
 static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
@@ -226,7 +229,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
 
     switch (num_devices) {
         case 1:
-            return dispatch_mlp_swiglu_combiner<1>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<1, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -242,7 +245,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 4:
-            return dispatch_mlp_swiglu_combiner<4>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<4, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -258,7 +261,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
-            return dispatch_mlp_swiglu_combiner<8>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<8, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -274,7 +277,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
-            return dispatch_mlp_swiglu_combiner<16>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<16, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -290,7 +293,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
-            return dispatch_mlp_swiglu_combiner<32>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<32, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -306,7 +309,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
-            return dispatch_mlp_swiglu_combiner<64>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
+            return dispatch_mlp_swiglu_combiner<64, RoutedPrecision::MXFP8, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_mxfp8(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate_T, w_routed_gate_T_sc,
@@ -327,6 +330,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8_entrypoint(
     }
 }
 
+template <GluActivation ACTIVATION>
 static __host__ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor,
                            at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
@@ -367,7 +371,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint(
     const int num_devices = static_cast<int>(x_ptrs.size());
     switch (num_devices) {
         case 1:
-            return dispatch_mlp_swiglu_combiner<1, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
+            return dispatch_mlp_swiglu_combiner<1, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
@@ -375,7 +379,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 4:
-            return dispatch_mlp_swiglu_combiner<4, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
+            return dispatch_mlp_swiglu_combiner<4, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
@@ -383,7 +387,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 8:
-            return dispatch_mlp_swiglu_combiner<8, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
+            return dispatch_mlp_swiglu_combiner<8, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
@@ -391,7 +395,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 16:
-            return dispatch_mlp_swiglu_combiner<16, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
+            return dispatch_mlp_swiglu_combiner<16, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
@@ -399,7 +403,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 32:
-            return dispatch_mlp_swiglu_combiner<32, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
+            return dispatch_mlp_swiglu_combiner<32, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,
@@ -407,7 +411,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16_entrypoint(
                 schedule_peer_rank, schedule_peer_token_idx, num_tokens, tokens_per_expert,
                 topk, swiglu_limit, num_comm_sms, macrobatch_size, minibatch_size);
         case 64:
-            return dispatch_mlp_swiglu_combiner<64, RoutedPrecision::BF16>::dispatch_mlp_swiglu_combine_bwd_bf16(
+            return dispatch_mlp_swiglu_combiner<64, RoutedPrecision::BF16, ACTIVATION>::dispatch_mlp_swiglu_combine_bwd_bf16(
                 d_y_buffer, d_y_buffer_ptrs, d_x_routed_buffer, d_x_routed_buffer_ptrs,
                 router_weight_buffer, router_weight_buffer_ptrs, d_router_weight_buffer, d_router_weight_buffer_ptrs,
                 w_shared_gate, w_routed_gate, w_shared_up, w_routed_up, w_shared_down, w_routed_down,

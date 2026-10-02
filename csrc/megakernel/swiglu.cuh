@@ -129,22 +129,38 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
             }
 
             if constexpr (!USE_ROUTED_MXFP8) {
-                rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
-                compute_group::load(gate, gate_smem[stage]);
-                compute_group::load(up, up_smem[stage]);
-                if constexpr (IS_CLAMPED) {
-                    compute_group::min(gate, gate, swiglu_limit);
-                    compute_group::max(up, up, -swiglu_limit);
-                    compute_group::min(up, up, swiglu_limit);
+                if constexpr (USE_SITUGLU) {
+                    if (threadIdx.x == 0) tma::store_async_read_wait();
+                    __syncthreads();
+                    const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
+                    const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
+                    auto *hidden_pairs = reinterpret_cast<bf16_2 *>(hidden_smem.data);
+                    #pragma unroll
+                    for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
+                        const float2 gate = __bfloat1622float2(gate_pairs[i]);
+                        const float2 up = __bfloat1622float2(up_pairs[i]);
+                        hidden_pairs[i] = __floats2bfloat162_rn(
+                            situglu_forward(gate.x, up.x),
+                            situglu_forward(gate.y, up.y));
+                    }
+                } else {
+                    rt_fl<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, denominator;
+                    compute_group::load(gate, gate_smem[stage]);
+                    compute_group::load(up, up_smem[stage]);
+                    if constexpr (IS_CLAMPED) {
+                        compute_group::min(gate, gate, swiglu_limit);
+                        compute_group::max(up, up, -swiglu_limit);
+                        compute_group::min(up, up, swiglu_limit);
+                    }
+                    compute_group::mul(denominator, gate, -1.0f);
+                    compute_group::exp(denominator, denominator);
+                    compute_group::add(denominator, denominator, 1.0f);
+                    compute_group::div(gate, gate, denominator);
+                    compute_group::mul(gate, gate, up);
+                    if (threadIdx.x == 0) tma::store_async_read_wait();
+                    __syncthreads();
+                    compute_group::store(hidden_smem, gate);
                 }
-                compute_group::mul(denominator, gate, -1.0f);
-                compute_group::exp(denominator, denominator);
-                compute_group::add(denominator, denominator, 1.0f);
-                compute_group::div(gate, gate, denominator);
-                compute_group::mul(gate, gate, up);
-                if (threadIdx.x == 0) tma::store_async_read_wait();
-                __syncthreads();
-                compute_group::store(hidden_smem, gate);
             } else {
                 const auto *gate_pairs = reinterpret_cast<const bf16_2 *>(gate_smem[stage].data);
                 const auto *up_pairs = reinterpret_cast<const bf16_2 *>(up_smem[stage].data);
@@ -153,15 +169,19 @@ static __device__ __forceinline__ void swiglu_fwd_kernel(
                 for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
                     float2 gate = __bfloat1622float2(gate_pairs[i]);
                     float2 up = __bfloat1622float2(up_pairs[i]);
-                    if constexpr (IS_CLAMPED) {
-                        gate = {fminf(gate.x, swiglu_limit), fminf(gate.y, swiglu_limit)};
-                        up = {fminf(fmaxf(up.x, -swiglu_limit), swiglu_limit), fminf(fmaxf(up.y, -swiglu_limit), swiglu_limit)};
+                    if constexpr (USE_SITUGLU) {
+                        gate = float2{situglu_forward(gate.x, up.x), situglu_forward(gate.y, up.y)};
+                    } else {
+                        if constexpr (IS_CLAMPED) {
+                            gate = {fminf(gate.x, swiglu_limit), fminf(gate.y, swiglu_limit)};
+                            up = {fminf(fmaxf(up.x, -swiglu_limit), swiglu_limit), fminf(fmaxf(up.y, -swiglu_limit), swiglu_limit)};
+                        }
+                        float2 denominator = base_ops::mul::op<float2>(gate, float2{-1.0f, -1.0f});
+                        denominator = base_ops::exp::op<float2>(denominator);
+                        denominator = base_ops::sum::op<float2>(denominator, float2{1.0f, 1.0f});
+                        gate = base_ops::div::op<float2>(gate, denominator);
+                        gate = base_ops::mul::op<float2>(gate, up);
                     }
-                    float2 denominator = base_ops::mul::op<float2>(gate, float2{-1.0f, -1.0f});
-                    denominator = base_ops::exp::op<float2>(denominator);
-                    denominator = base_ops::sum::op<float2>(denominator, float2{1.0f, 1.0f});
-                    gate = base_ops::div::op<float2>(gate, denominator);
-                    gate = base_ops::mul::op<float2>(gate, up);
                     hidden_pairs[i] = __floats2bfloat162_rn(gate.x, gate.y);
                 }
             }
@@ -383,12 +403,28 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                     mxfp8::dequantize_single_block(gate_fp8, (static_cast<uint32_t>(gate_scale_word) >> (k_block_idx * 8)) & 0xFF, gate_fp32);
                     mxfp8::dequantize_single_block(up_fp8, (static_cast<uint32_t>(up_scale_word) >> (k_block_idx * 8)) & 0xFF, up_fp32);
 
-                    // Apply SwiGLU backward
+                    // Apply the selected GLU derivative in fp32 before requantizing the gradients
                     bf16_2 d_gate_bf16[16], d_up_bf16[16];
                     #pragma unroll
                     for (int k = 0; k < 16; ++k) {
-                        const float2 hidden = swiglu_bwd_pair<IS_CLAMPED>(gate_fp32[k], up_fp32[k], d_hidden_fp32[k], swiglu_limit, d_gate_bf16[k], d_up_bf16[k]);
-                        router_grad_partial += d_hidden_fp32[k].x * inv_router_weight * hidden.x + d_hidden_fp32[k].y * inv_router_weight * hidden.y;
+                        const float d_hidden_x = d_hidden_fp32[k].x;
+                        const float d_hidden_y = d_hidden_fp32[k].y;
+                        if constexpr (USE_SITUGLU) {
+                            const situglu_backward_terms terms_x = situglu_backward(gate_fp32[k].x, up_fp32[k].x);
+                            const situglu_backward_terms terms_y = situglu_backward(gate_fp32[k].y, up_fp32[k].y);
+                            router_grad_partial += d_hidden_x * inv_router_weight * terms_x.hidden
+                                                 + d_hidden_y * inv_router_weight * terms_y.hidden;
+                            d_gate_bf16[k] = __floats2bfloat162_rn(
+                                terms_x.d_gate * d_hidden_x,
+                                terms_y.d_gate * d_hidden_y);
+                            d_up_bf16[k] = __floats2bfloat162_rn(
+                                terms_x.d_up * d_hidden_x,
+                                terms_y.d_up * d_hidden_y);
+                        } else {
+                            const float2 hidden = swiglu_bwd_pair<IS_CLAMPED>(gate_fp32[k], up_fp32[k], d_hidden_fp32[k], swiglu_limit, d_gate_bf16[k], d_up_bf16[k]);
+                            router_grad_partial += d_hidden_x * inv_router_weight * hidden.x
+                                                 + d_hidden_y * inv_router_weight * hidden.y;
+                        }
                     }
 
                     // Quantize both gradients; also stage them in BF16 for the transpose-quantize below
@@ -447,7 +483,25 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                 }
                 __syncthreads();
             } else if constexpr (IS_SHARED) {
-                if constexpr (IS_CLAMPED) {
+                if constexpr (USE_SITUGLU) {
+                    const auto *d_hidden_pairs = reinterpret_cast<const bf16_2 *>(d_hidden_smem[stage].data);
+                    auto *gate_pairs = reinterpret_cast<bf16_2 *>(gate_smem[stage].data);
+                    auto *up_pairs = reinterpret_cast<bf16_2 *>(up_smem[stage].data);
+                    #pragma unroll
+                    for (int i = threadIdx.x; i < config::SWIGLU_Mb * config::SWIGLU_Nb / 2; i += config::NUM_THREADS) {
+                        const float2 gate = __bfloat1622float2(gate_pairs[i]);
+                        const float2 up = __bfloat1622float2(up_pairs[i]);
+                        const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[i]);
+                        const situglu_backward_terms terms_x = situglu_backward(gate.x, up.x);
+                        const situglu_backward_terms terms_y = situglu_backward(gate.y, up.y);
+                        gate_pairs[i] = __floats2bfloat162_rn(
+                            terms_x.d_gate * d_hidden.x,
+                            terms_y.d_gate * d_hidden.y);
+                        up_pairs[i] = __floats2bfloat162_rn(
+                            terms_x.d_up * d_hidden.x,
+                            terms_y.d_up * d_hidden.y);
+                    }
+                } else if constexpr (IS_CLAMPED) {
                     rt_bf<config::SWIGLU_Mb / config::NUM_WARPS, config::SWIGLU_Nb> gate, up, d_hidden;
                     compute_group::load(gate, gate_smem[stage]);
                     compute_group::load(up, up_smem[stage]);
@@ -520,8 +574,22 @@ static __device__ __forceinline__ void swiglu_bwd_kernel(
                         const float2 gate = __bfloat1622float2(gate_pairs[j]);
                         const float2 up = __bfloat1622float2(up_pairs[j]);
                         const float2 d_hidden = __bfloat1622float2(d_hidden_pairs[j]);
-                        const float2 hidden = swiglu_bwd_pair<IS_CLAMPED>(gate, up, d_hidden, swiglu_limit, d_gate_pairs[j], d_up_pairs[j]);
-                        router_grad_partial += d_hidden.x * inv_router_weight * hidden.x + d_hidden.y * inv_router_weight * hidden.y;
+                        if constexpr (USE_SITUGLU) {
+                            const situglu_backward_terms terms_x = situglu_backward(gate.x, up.x);
+                            const situglu_backward_terms terms_y = situglu_backward(gate.y, up.y);
+                            router_grad_partial += d_hidden.x * inv_router_weight * terms_x.hidden
+                                                 + d_hidden.y * inv_router_weight * terms_y.hidden;
+                            d_gate_pairs[j] = __floats2bfloat162_rn(
+                                terms_x.d_gate * d_hidden.x,
+                                terms_y.d_gate * d_hidden.y);
+                            d_up_pairs[j] = __floats2bfloat162_rn(
+                                terms_x.d_up * d_hidden.x,
+                                terms_y.d_up * d_hidden.y);
+                        } else {
+                            const float2 hidden = swiglu_bwd_pair<IS_CLAMPED>(gate, up, d_hidden, swiglu_limit, d_gate_pairs[j], d_up_pairs[j]);
+                            router_grad_partial += d_hidden.x * inv_router_weight * hidden.x
+                                                 + d_hidden.y * inv_router_weight * hidden.y;
+                        }
                     }
                     const auto *d_gate_words = reinterpret_cast<const uint32_t *>(d_gate_pairs);
                     const auto *d_up_words = reinterpret_cast<const uint32_t *>(d_up_pairs);

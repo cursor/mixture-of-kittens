@@ -500,3 +500,123 @@ def test_e2e_mxfp8_recomputed_forward_context(
                 MXFP8_TOLERANCE,
                 print_stats=rank == 0,
             )
+
+
+def test_e2e_situglu(context: tuple[int, int, torch.device]) -> None:
+    rank, world_size, device = context
+    num_experts = world_size
+    num_local_experts = 1
+    hidden_dim = 256
+    intermediate_dim = 256
+    topk = 1
+    num_local_tokens = 512
+    inputs = generate_inputs(
+        rank,
+        device,
+        num_experts,
+        num_local_experts,
+        topk,
+        num_local_tokens,
+        hidden_dim,
+        intermediate_dim,
+    )
+    (
+        x,
+        topk_experts,
+        router_weights,
+        w_shared_gate,
+        w_shared_up,
+        w_shared_down,
+        w_routed_gate,
+        w_routed_up,
+        w_routed_down,
+        d_output,
+    ) = inputs
+    reference_results = run_reference_bf16(*inputs, activation="situglu")
+    config = functional.MoKConfig(
+        fwd_num_comm_sms=2,
+        bwd_num_comm_sms=2,
+        minibatch_size=256,
+        macrobatch_size=256,
+        schedule_capacity_multiplier=1.5,
+        all_gather_top_experts_chunk_bytes=16,
+        activation="situglu",
+    )
+    workspace = get_workspace(
+        config,
+        dist.group.WORLD,
+        device=device,
+        num_local_tokens=num_local_tokens,
+        hidden_size=hidden_dim,
+        topk=topk,
+    )
+    schedule = functional.build_schedule(
+        workspace,
+        config,
+        topk_experts,
+        num_local_experts=num_local_experts,
+    )
+
+    for precision in ("bf16", "mxfp8"):
+        if precision == "bf16":
+            forward_weights = (w_routed_gate, w_routed_up, w_routed_down)
+            backward_weights = forward_weights
+            tolerance = BF16_TOLERANCE
+        else:
+            gate_fp8, gate_sc, gate_t_fp8, gate_t_sc = mxfp8_quantize(
+                w_routed_gate, True, True
+            )
+            up_fp8, up_sc, up_t_fp8, up_t_sc = mxfp8_quantize(
+                w_routed_up, True, True
+            )
+            down_fp8, down_sc, down_t_fp8, down_t_sc = mxfp8_quantize(
+                w_routed_down, True, True
+            )
+            forward_weights = (
+                (gate_fp8, gate_sc),
+                (up_fp8, up_sc),
+                (down_fp8, down_sc),
+            )
+            backward_weights = (
+                (gate_fp8, gate_sc, gate_t_fp8, gate_t_sc),
+                (up_fp8, up_sc, up_t_fp8, up_t_sc),
+                (down_t_fp8, down_t_sc),
+            )
+            tolerance = MXFP8_TOLERANCE
+
+        output, forward_context = functional.forward(
+            config,
+            workspace,
+            schedule,
+            x,
+            router_weights,
+            w_shared_gate,
+            w_shared_up,
+            w_shared_down,
+            *forward_weights,
+        )
+        gradients = functional.backward(
+            config,
+            workspace,
+            schedule,
+            forward_context,
+            d_output,
+            x,
+            router_weights,
+            w_shared_gate,
+            w_shared_up,
+            w_shared_down,
+            *backward_weights,
+        )
+        results = (output, *gradients)
+
+        for name, reference, actual in zip(
+            RESULT_NAMES, reference_results, results, strict=True
+        ):
+            check_correctness(
+                f"situ-glu/{precision}/{name}",
+                reference,
+                actual,
+                tolerance,
+                print_stats=rank == 0,
+            )

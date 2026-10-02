@@ -105,6 +105,8 @@ MoK relies on PyTorch symmetric memory to allocate and manage inter-GPU symmetri
 
 Because symmetric buffers are expensive to allocate, we recommend creating a single workspace per model and reusing it across layers. For this, we provide the `get_workspace(...)` function, which automatically caches workspaces with identical properties (EP group, device, model shapes, etc.). If you prefer to manage a workspace's lifetime yourself, the `create_workspace(...)` function does not cache.
 
+The workspace's `num_local_tokens` is a per-rank capacity (at least 512 and a multiple of 256, the same on every EP rank). Each call may pass any `0 <= n <= num_local_tokens` rows (`x`, `topk_experts`, `router_weights`, `d_output` of `n` rows), independently on each rank and per call, and gets `n`-row outputs back. Rows past `n` cost no dispatch, compute, or combine, and the results are bitwise identical to padding every rank to capacity with zero rows routed to expert `-1`. A rank with `n = 0` still joins every call and serves its experts to its peers.
+
 ### MXFP8
 
 To run MoK in MXFP8 mode, pass the activations as-is in BF16 while prequantizing the weights to MXFP8. We *could* quantize the weights inside our kernels, but prequantizing leaves better opportunities for things like FSDP, so we keep it separate and provide the `mxfp8_quantize(...)` function at the ops layer so you can prequantize the weights yourself.

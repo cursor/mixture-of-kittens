@@ -7,9 +7,9 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
     int cluster_idx = clusterIdx().x;
     const int cta_rank = cluster_ctarank();
 
-    const int shared_row_blocks = g.d_y_shared.rows() / config::MLP_Mb;
+    const int shared_row_blocks = num_shared_row_blocks(g.num_local_tokens);
     const int shared_dgrad_down_tasks = shared_row_blocks * intermediate_dim_col_blocks;
-    const int shared_swiglu_bwd_tiles = (g.hidden_shared.rows() / config::SWIGLU_Mb) * (g.hidden_shared.cols() / config::SWIGLU_Nb);
+    const int shared_swiglu_bwd_tiles = shared_row_blocks * (config::MLP_Mb / config::SWIGLU_Mb) * (g.hidden_shared.cols() / config::SWIGLU_Nb);
     const int shared_swiglu_bwd_tasks = (shared_swiglu_bwd_tiles + config::CLUSTER_SIZE * config::SWIGLU_BWD_PIPE_DEPTH - 1) / (config::CLUSTER_SIZE * config::SWIGLU_BWD_PIPE_DEPTH);
     const int shared_dgrad_gate_up_tasks = shared_row_blocks * hidden_dim_col_blocks;
     const int shared_wgrad_tasks = intermediate_dim_col_blocks * hidden_dim_col_blocks; // per weight matrix
@@ -230,7 +230,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                       g.tokens_per_expert, nullptr, nullptr, nullptr, &g.d_hidden_ready, nullptr, nullptr,
                                       d_tt, a_sc_tt, b_sc_tt,
                                       gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                      g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                       0, 0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks) {
             // Shared Swiglu bwd: d_gate_shared, d_up_shared = swiglu_bwd(d_hidden_shared, gate_shared, up_shared)
@@ -240,7 +240,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                              nullptr, nullptr, nullptr,
                              g.d_hidden_ready, nullptr, g.d_gate_up_ready, nullptr,
                              swiglu_bwd_inputs_arrived, swiglu_bwd_bitfield,
-                             g.gate_shared.rows(), g.swiglu_limit, macrobatch_size, g.minibatch_size,
+                             shared_row_blocks * config::MLP_Mb, g.swiglu_limit, macrobatch_size, g.minibatch_size,
                              0, 0, task_idx, cta_rank,
                              0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks + shared_dgrad_gate_up_tasks) {
@@ -251,7 +251,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                       g.tokens_per_expert, nullptr, &g.d_gate_up_ready, nullptr, nullptr, nullptr, nullptr,
                                       d_tt, a_sc_tt, b_sc_tt,
                                       gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                      num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                      g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                       0, 0, d_gate_up_row_block_ready_required_count, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_dgrad_down_tasks + shared_swiglu_bwd_tasks + shared_dgrad_gate_up_tasks + shared_wgrad_tasks) {
             // Shared wgrad down: d_w_shared_down += d_y_shared^T @ hidden_shared
@@ -261,7 +261,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                             g.tokens_per_expert, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                                             d_tt, a_sc_tt, b_sc_tt,
                                             gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                            num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                            g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                             0, 0, 0, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_tasks - shared_wgrad_tasks) {
             // Shared wgrad gate: d_w_shared_gate += d_gate_shared^T @ x_shared
@@ -271,7 +271,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                             g.tokens_per_expert, nullptr, &g.d_gate_up_ready, nullptr, nullptr, nullptr, nullptr,
                                             d_tt, a_sc_tt, b_sc_tt,
                                             gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                            num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                            g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                             0, 0, d_gate_up_row_block_ready_required_count, 0, 0, smem_base_addr);
         } else if (compute_cluster_idx < shared_tasks) {
             // Shared wgrad up: d_w_shared_up += d_up_shared^T @ x_shared
@@ -281,7 +281,7 @@ static __device__ __forceinline__ void dispatch_mlp_swiglu_combine_bwd_kernel(co
                                             g.tokens_per_expert, nullptr, &g.d_gate_up_ready, nullptr, nullptr, nullptr, nullptr,
                                             d_tt, a_sc_tt, b_sc_tt,
                                             gemm_inputs_arrived, gemm_scales_arrived, gemm_inputs_finished, gemm_scales_finished, gemm_outputs_arrived, gemm_outputs_finished, gemm_bitfield,
-                                            num_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
+                                            g.num_local_tokens, macrobatch_size, g.minibatch_size, 0, 0, task_idx, cta_rank,
                                             0, 0, d_gate_up_row_block_ready_required_count, 0, 0, smem_base_addr);
         } else {
             // Routed / replay tasks
@@ -508,9 +508,13 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
     const int num_local_experts = w_routed_gate.size(0);
     const int num_global_minibatches = (schedule_capacity + minibatch_size - 1) / minibatch_size;
     const int num_macrobatches = (schedule_capacity + macrobatch_size - 1) / macrobatch_size;
-    const int shared_row_blocks = num_local_tokens / config::MLP_Mb;
+    const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
     const int routed_row_blocks = schedule_capacity / config::MLP_Mb;
     const int intermediate_dim_col_blocks = intermediate_dim / config::MLP_Nb;
+    // Shared wgrads reduce over the local tokens; with none, every shared wgrad task has an empty K range and stores nothing
+    auto shared_wgrad = [&](at::IntArrayRef sizes) {
+        return num_local_tokens > 0 ? at::empty(sizes, d_y_buffer.options()) : at::zeros(sizes, d_y_buffer.options());
+    };
 
     activation_bf16_pgl x_routed_send_buffer_data;
     activation_bf16_pgl d_y_buffer_data;
@@ -554,11 +558,11 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
     at::Tensor d_up_shared = at::empty_like(d_hidden_shared);
     at::Tensor d_x_shared = at::empty({num_local_tokens, hidden_dim}, d_y_buffer.options());
     at::Tensor d_x_routed = at::empty({macrobatch_size, hidden_dim}, d_y_buffer.options());
-    at::Tensor d_w_shared_gate = at::empty({intermediate_dim, hidden_dim}, d_y_buffer.options());
+    at::Tensor d_w_shared_gate = shared_wgrad({intermediate_dim, hidden_dim});
     at::Tensor d_w_routed_gate = at::empty({num_local_experts, intermediate_dim, hidden_dim}, d_y_buffer.options());
-    at::Tensor d_w_shared_up = at::empty({intermediate_dim, hidden_dim}, d_y_buffer.options());
+    at::Tensor d_w_shared_up = shared_wgrad({intermediate_dim, hidden_dim});
     at::Tensor d_w_routed_up = at::empty({num_local_experts, intermediate_dim, hidden_dim}, d_y_buffer.options());
-    at::Tensor d_w_shared_down = at::empty({hidden_dim, intermediate_dim}, d_y_buffer.options());
+    at::Tensor d_w_shared_down = shared_wgrad({hidden_dim, intermediate_dim});
     at::Tensor d_w_routed_down = at::empty({num_local_experts, hidden_dim, intermediate_dim}, d_y_buffer.options());
 
     // Counters
@@ -573,42 +577,42 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
     at::Tensor router_weights_ready = at::zeros({num_macrobatches}, tokens_per_expert.options());
 
     globals_bwd g {
-        .x_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(x),
+        .x_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(nonempty_rows(x)),
         .x_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(x_fp8_routed),
         .x_sc_routed = kittens::py::tensor_to_gl<sc_gl>(x_sc_routed),
         .x_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(x_fp8_t_routed),
         .x_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(x_sc_t_routed),
-        .gate_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(gate_shared),
+        .gate_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(nonempty_rows(gate_shared)),
         .gate_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(gate_routed),
         .gate_fp8_routed = kittens::py::tensor_to_gl<gate_up_fp8_gl>(gate_fp8_routed),
         .gate_sc_routed = kittens::py::tensor_to_gl<sc_gl>(gate_sc_routed),
-        .up_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(up_shared),
+        .up_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(nonempty_rows(up_shared)),
         .up_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(up_routed),
         .up_fp8_routed = kittens::py::tensor_to_gl<gate_up_fp8_gl>(up_fp8_routed),
         .up_sc_routed = kittens::py::tensor_to_gl<sc_gl>(up_sc_routed),
-        .hidden_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(hidden_shared),
+        .hidden_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(nonempty_rows(hidden_shared)),
         .hidden_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(hidden_fp8_routed),
         .hidden_sc_routed = kittens::py::tensor_to_gl<sc_gl>(hidden_sc_routed),
         .hidden_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(hidden_fp8_t_routed),
         .hidden_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(hidden_sc_t_routed),
-        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_y_buffer),
+        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(d_y_buffer)),
         .d_y_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_y_fp8_routed),
         .d_y_sc_routed = kittens::py::tensor_to_gl<sc_gl>(d_y_sc_routed),
         .d_y_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_y_fp8_t_routed),
         .d_y_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(d_y_sc_t_routed),
-        .d_hidden_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(d_hidden_shared),
+        .d_hidden_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(d_hidden_shared)),
         .d_hidden_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(d_hidden_routed),
-        .d_gate_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_gate_shared),
+        .d_gate_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(d_gate_shared)),
         .d_gate_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_gate_fp8_routed),
         .d_gate_sc_routed = kittens::py::tensor_to_gl<sc_gl>(d_gate_sc_routed),
         .d_gate_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_gate_fp8_t_routed),
         .d_gate_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(d_gate_sc_t_routed),
-        .d_up_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_up_shared),
+        .d_up_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(d_up_shared)),
         .d_up_fp8_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_up_fp8_routed),
         .d_up_sc_routed = kittens::py::tensor_to_gl<sc_gl>(d_up_sc_routed),
         .d_up_fp8_t_routed = kittens::py::tensor_to_gl<mlp_fp8_gl>(d_up_fp8_t_routed),
         .d_up_sc_t_routed = kittens::py::tensor_to_gl<sc_gl>(d_up_sc_t_routed),
-        .d_x_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(d_x_shared),
+        .d_x_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(d_x_shared)),
         .d_x_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(d_x_routed),
         .x_routed_send_buffer = x_routed_send_buffer_data,
         .d_y_buffer = d_y_buffer_data,
@@ -649,6 +653,7 @@ dispatch_mlp_swiglu_combine_bwd_mxfp8(
         .replayed_gate_up_ready = kittens::py::tensor_to_gl<index_gl>(replayed_gate_up_ready),
         .replayed_hidden_ready = kittens::py::tensor_to_gl<index_gl>(replayed_hidden_ready),
         .routed_buffers_done = kittens::py::tensor_to_gl<index_gl>(routed_buffers_done),
+        .num_local_tokens = num_local_tokens,
         .topk = topk,
         .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,
@@ -723,9 +728,13 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     const int num_local_experts = w_routed_gate.size(0);
     const int num_global_minibatches = (schedule_capacity + minibatch_size - 1) / minibatch_size;
     const int num_macrobatches = (schedule_capacity + macrobatch_size - 1) / macrobatch_size;
-    const int shared_row_blocks = num_local_tokens / config::MLP_Mb;
+    const int shared_row_blocks = num_shared_row_blocks(num_local_tokens);
     const int routed_row_blocks = schedule_capacity / config::MLP_Mb;
     const int intermediate_dim_col_blocks = intermediate_dim / config::MLP_Nb;
+    // Shared wgrads reduce over the local tokens; with none, every shared wgrad task has an empty K range and stores nothing
+    auto shared_wgrad = [&](at::IntArrayRef sizes) {
+        return num_local_tokens > 0 ? at::empty(sizes, d_y_buffer.options()) : at::zeros(sizes, d_y_buffer.options());
+    };
 
     activation_bf16_pgl x_routed_send_buffer_data;
     activation_bf16_pgl d_y_buffer_data;
@@ -751,11 +760,11 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     at::Tensor d_up_routed = at::empty_like(d_hidden_routed);
     at::Tensor d_x_shared = at::empty({num_local_tokens, hidden_dim}, d_y_buffer.options());
     at::Tensor d_x_routed = at::empty({macrobatch_size, hidden_dim}, d_y_buffer.options());
-    at::Tensor d_w_shared_gate = at::empty({intermediate_dim, hidden_dim}, d_y_buffer.options());
+    at::Tensor d_w_shared_gate = shared_wgrad({intermediate_dim, hidden_dim});
     at::Tensor d_w_routed_gate = at::empty(w_routed_gate.sizes(), w_routed_gate.options());
-    at::Tensor d_w_shared_up = at::empty({intermediate_dim, hidden_dim}, d_y_buffer.options());
+    at::Tensor d_w_shared_up = shared_wgrad({intermediate_dim, hidden_dim});
     at::Tensor d_w_routed_up = at::empty(w_routed_up.sizes(), w_routed_up.options());
-    at::Tensor d_w_shared_down = at::empty({hidden_dim, intermediate_dim}, d_y_buffer.options());
+    at::Tensor d_w_shared_down = shared_wgrad({hidden_dim, intermediate_dim});
     at::Tensor d_w_routed_down = at::empty(w_routed_down.sizes(), w_routed_down.options());
 
     at::Tensor d_y_routed_ready = at::zeros({num_global_minibatches}, tokens_per_expert.options());
@@ -769,42 +778,42 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
     at::Tensor router_weights_ready = at::zeros({num_macrobatches}, tokens_per_expert.options());
 
     globals_bwd g {
-        .x_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(x),
+        .x_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(nonempty_rows(x)),
         .x_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(x_routed),
         .x_sc_routed = {},
         .x_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(x_routed),
         .x_sc_t_routed = {},
-        .gate_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(gate_shared),
+        .gate_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(nonempty_rows(gate_shared)),
         .gate_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(gate_routed),
         .gate_fp8_routed = kittens::py::tensor_to_gl<routed_gate_up_gl>(gate_routed),
         .gate_sc_routed = {},
-        .up_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(up_shared),
+        .up_shared = kittens::py::tensor_to_gl<swiglu_bf16_gl>(nonempty_rows(up_shared)),
         .up_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(up_routed),
         .up_fp8_routed = kittens::py::tensor_to_gl<routed_gate_up_gl>(up_routed),
         .up_sc_routed = {},
-        .hidden_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(hidden_shared),
+        .hidden_shared = kittens::py::tensor_to_gl<wgrad_bf16_gl>(nonempty_rows(hidden_shared)),
         .hidden_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(hidden_routed),
         .hidden_sc_routed = {},
         .hidden_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(hidden_routed),
         .hidden_sc_t_routed = {},
-        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_y_buffer),
+        .d_y_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(d_y_buffer)),
         .d_y_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(d_y_routed),
         .d_y_sc_routed = {},
         .d_y_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(d_y_routed),
         .d_y_sc_t_routed = {},
-        .d_hidden_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(d_hidden_shared),
+        .d_hidden_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(d_hidden_shared)),
         .d_hidden_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(d_hidden_routed),
-        .d_gate_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_gate_shared),
+        .d_gate_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(d_gate_shared)),
         .d_gate_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(d_gate_routed),
         .d_gate_sc_routed = {},
         .d_gate_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(d_gate_routed),
         .d_gate_sc_t_routed = {},
-        .d_up_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(d_up_shared),
+        .d_up_shared = kittens::py::tensor_to_gl<mlp_bf16_gl>(nonempty_rows(d_up_shared)),
         .d_up_fp8_routed = kittens::py::tensor_to_gl<routed_activation_gl>(d_up_routed),
         .d_up_sc_routed = {},
         .d_up_fp8_t_routed = kittens::py::tensor_to_gl<routed_transposed_gl>(d_up_routed),
         .d_up_sc_t_routed = {},
-        .d_x_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(d_x_shared),
+        .d_x_shared = kittens::py::tensor_to_gl<epi_bf16_gl>(nonempty_rows(d_x_shared)),
         .d_x_routed = kittens::py::tensor_to_gl<epi_bf16_gl>(d_x_routed),
         .x_routed_send_buffer = x_routed_send_buffer_data,
         .d_y_buffer = d_y_buffer_data,
@@ -845,6 +854,7 @@ dispatch_mlp_swiglu_combine_bwd_bf16(
         .replayed_gate_up_ready = kittens::py::tensor_to_gl<index_gl>(replayed_gate_up_ready),
         .replayed_hidden_ready = kittens::py::tensor_to_gl<index_gl>(replayed_hidden_ready),
         .routed_buffers_done = kittens::py::tensor_to_gl<index_gl>(routed_buffers_done),
+        .num_local_tokens = num_local_tokens,
         .topk = topk,
         .swiglu_limit = swiglu_limit.value_or(0.0f),
         .num_comm_sms = num_comm_sms,

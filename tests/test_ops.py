@@ -2311,7 +2311,7 @@ def test_fwd_epilogue(context: tuple[int, int, torch.device]) -> None:
     }
     for failure_name, overrides, expected_exception in (
         ("shared output rank", {"y_shared": y_shared.unsqueeze(0)}, ValueError),
-        ("local token minimum", {"y_shared": y_shared[:256]}, ValueError),
+        ("token count mismatch", {"y_shared": y_shared[:256]}, ValueError),
         ("hidden alignment", {"y_shared": y_shared[:, :128]}, ValueError),
         (
             "top-k minimum",
@@ -2403,8 +2403,13 @@ def test_bwd_epilogue(context: tuple[int, int, torch.device]) -> None:
             ValueError,
         ),
         (
-            "local token minimum",
-            {"d_x_shared": d_x_shared[:256]},
+            "routes not a multiple of tokens",
+            {"d_x_shared": d_x_shared[:300]},
+            ValueError,
+        ),
+        (
+            "routes without tokens",
+            {"d_x_shared": d_x_shared[:0]},
             ValueError,
         ),
         (

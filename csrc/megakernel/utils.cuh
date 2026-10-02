@@ -1,3 +1,9 @@
+// cuTensorMapEncodeTiled rejects zero-sized dimensions. A rank without local tokens runs no shared-expert tile,
+// so its empty shared tensors are described by an untouched one-row placeholder instead.
+static __host__ inline at::Tensor nonempty_rows(const at::Tensor &tensor) {
+    return tensor.size(0) > 0 ? tensor : at::empty({1, tensor.size(1)}, tensor.options());
+}
+
 static __device__ __forceinline__ void barrier_wait(const index_gl &counter, int index, int required_count) {
     int value;
     while (true) {

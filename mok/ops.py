@@ -241,7 +241,7 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
     Inputs:
         x:                       bfloat16 [num_local_tokens, hidden_size]
         x_ptrs:                  list[int] [ep_size]
-        combine_buffer:          bfloat16 [num_local_tokens * topk, hidden_size]
+        combine_buffer:          bfloat16 [token_capacity * topk, hidden_size]
         combine_buffer_ptrs:     list[int] [ep_size]
         w_shared_gate:           bfloat16 [intermediate_size, hidden_size]
         w_routed_gate:           float8_e4m3fn [num_local_experts, intermediate_size, hidden_size]
@@ -280,8 +280,6 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
     if x.ndim != 2:
         raise ValueError("x must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = x.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
@@ -316,8 +314,11 @@ def dispatch_mlp_swiglu_combine_fwd_mxfp8(
         raise ValueError("w_routed_gate must have shape "
                          "(num_local_experts, intermediate_size, hidden_size)")
     num_local_experts = w_routed_gate.shape[0]
+    if (combine_buffer.ndim != 2 or combine_buffer.shape[1] != hidden_size
+            or combine_buffer.shape[0] % topk != 0 or combine_buffer.shape[0] < num_local_tokens * topk):
+        raise ValueError("combine_buffer must have shape (token_capacity * topk, hidden_size) "
+                         "with token_capacity >= num_local_tokens")
     expected_shapes = (
-        ("combine_buffer", combine_buffer, (num_local_tokens * topk, hidden_size)),
         ("w_shared_gate", w_shared_gate, (intermediate_size, hidden_size)),
         ("w_routed_gate", w_routed_gate, (num_local_experts, intermediate_size, hidden_size)),
         ("w_routed_gate_sc", w_routed_gate_sc,
@@ -411,7 +412,7 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     Inputs:
         x:                       bfloat16 [num_local_tokens, hidden_size]
         x_ptrs:                  list[int] [ep_size]
-        combine_buffer:          bfloat16 [num_local_tokens * topk, hidden_size]
+        combine_buffer:          bfloat16 [token_capacity * topk, hidden_size]
         combine_buffer_ptrs:     list[int] [ep_size]
         w_shared_gate:           bfloat16 [intermediate_size, hidden_size]
         w_routed_gate:           bfloat16 [num_local_experts, intermediate_size, hidden_size]
@@ -443,8 +444,6 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     if x.ndim != 2:
         raise ValueError("x must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = x.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if w_shared_gate.ndim != 2 or w_shared_gate.shape[1] != hidden_size:
@@ -480,8 +479,11 @@ def dispatch_mlp_swiglu_combine_fwd_bf16(
     schedule_capacity = schedule_peer_rank.numel()
     if schedule_capacity % 256 != 0:
         raise ValueError("schedule_capacity must be divisible by 256")
+    if (combine_buffer.ndim != 2 or combine_buffer.shape[1] != hidden_size
+            or combine_buffer.shape[0] % topk != 0 or combine_buffer.shape[0] < num_local_tokens * topk):
+        raise ValueError("combine_buffer must have shape (token_capacity * topk, hidden_size) "
+                         "with token_capacity >= num_local_tokens")
     expected_shapes = (
-        ("combine_buffer", combine_buffer, (num_local_tokens * topk, hidden_size)),
         ("w_shared_gate", w_shared_gate, (intermediate_size, hidden_size)),
         ("w_routed_gate", w_routed_gate, (num_local_experts, intermediate_size, hidden_size)),
         ("w_shared_up", w_shared_up, (intermediate_size, hidden_size)),
@@ -589,8 +591,6 @@ def recompute_forward_context_mxfp8(
     if x.ndim != 2:
         raise ValueError("x must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = x.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
@@ -722,8 +722,6 @@ def recompute_forward_context_bf16(
     if x.ndim != 2:
         raise ValueError("x must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = x.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if w_shared_gate.ndim != 2 or w_shared_gate.shape[1] != hidden_size:
@@ -858,11 +856,11 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     Inputs:
         d_y_buffer:                    bfloat16 [num_local_tokens, hidden_size]
         d_y_buffer_ptrs:               list[int] [ep_size]
-        d_x_routed_buffer:             bfloat16 [num_local_tokens * topk, hidden_size]
+        d_x_routed_buffer:             bfloat16 [token_capacity * topk, hidden_size]
         d_x_routed_buffer_ptrs:        list[int] [ep_size]
-        router_weight_buffer:          float32 [num_local_tokens, topk]
+        router_weight_buffer:          float32 [token_capacity, topk]
         router_weight_buffer_ptrs:     list[int] [ep_size]
-        d_router_weight_buffer:        float32 [num_local_tokens, topk]
+        d_router_weight_buffer:        float32 [token_capacity, topk]
         d_router_weight_buffer_ptrs:   list[int] [ep_size]
         w_shared_gate:                 bfloat16 [intermediate_size, hidden_size]
         w_routed_gate_T:               float8_e4m3fn [num_local_experts, hidden_size, intermediate_size]
@@ -923,8 +921,6 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     if x.ndim != 2:
         raise ValueError("x must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = x.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if type(topk) is not int or not 0 < topk <= 255:
@@ -975,11 +971,15 @@ def dispatch_mlp_swiglu_combine_bwd_mxfp8(
     h_mb_sc = (hidden_size // 128, macrobatch_size // 128, 32, 16)
     e_i_h_sc = (num_local_experts * intermediate_size // 128, hidden_size // 128, 32, 16)
     e_h_i_sc = (num_local_experts * hidden_size // 128, intermediate_size // 128, 32, 16)
+    token_capacity = router_weight_buffer.shape[0] if router_weight_buffer.ndim == 2 else -1
+    if token_capacity < num_local_tokens:
+        raise ValueError("router_weight_buffer must have shape (token_capacity, topk) "
+                         "with token_capacity >= num_local_tokens")
     expected_shapes = (
         ("d_y_buffer", d_y_buffer, (num_local_tokens, hidden_size)),
-        ("d_x_routed_buffer", d_x_routed_buffer, (num_local_tokens * topk, hidden_size)),
-        ("router_weight_buffer", router_weight_buffer, (num_local_tokens, topk)),
-        ("d_router_weight_buffer", d_router_weight_buffer, (num_local_tokens, topk)),
+        ("d_x_routed_buffer", d_x_routed_buffer, (token_capacity * topk, hidden_size)),
+        ("router_weight_buffer", router_weight_buffer, (token_capacity, topk)),
+        ("d_router_weight_buffer", d_router_weight_buffer, (token_capacity, topk)),
         ("w_shared_gate", w_shared_gate, (intermediate_size, hidden_size)),
         ("w_routed_gate_T", w_routed_gate_T,
          (num_local_experts, hidden_size, intermediate_size)),
@@ -1135,11 +1135,11 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     Inputs:
         d_y_buffer:                    bfloat16 [num_local_tokens, hidden_size]
         d_y_buffer_ptrs:               list[int] [ep_size]
-        d_x_routed_buffer:             bfloat16 [num_local_tokens * topk, hidden_size]
+        d_x_routed_buffer:             bfloat16 [token_capacity * topk, hidden_size]
         d_x_routed_buffer_ptrs:        list[int] [ep_size]
-        router_weight_buffer:          float32 [num_local_tokens, topk]
+        router_weight_buffer:          float32 [token_capacity, topk]
         router_weight_buffer_ptrs:     list[int] [ep_size]
-        d_router_weight_buffer:        float32 [num_local_tokens, topk]
+        d_router_weight_buffer:        float32 [token_capacity, topk]
         d_router_weight_buffer_ptrs:   list[int] [ep_size]
         w_shared_gate:                 bfloat16 [intermediate_size, hidden_size]
         w_routed_gate:                 bfloat16 [num_local_experts, intermediate_size, hidden_size]
@@ -1186,8 +1186,6 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     if x.ndim != 2:
         raise ValueError("x must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = x.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if w_shared_gate.ndim != 2 or w_shared_gate.shape[1] != hidden_size:
@@ -1231,11 +1229,15 @@ def dispatch_mlp_swiglu_combine_bwd_bf16(
     schedule_capacity = schedule_peer_rank.numel()
     if schedule_capacity % 256 != 0:
         raise ValueError("schedule_capacity must be divisible by 256")
+    token_capacity = router_weight_buffer.shape[0] if router_weight_buffer.ndim == 2 else -1
+    if token_capacity < num_local_tokens:
+        raise ValueError("router_weight_buffer must have shape (token_capacity, topk) "
+                         "with token_capacity >= num_local_tokens")
     expected_shapes = (
         ("d_y_buffer", d_y_buffer, (num_local_tokens, hidden_size)),
-        ("d_x_routed_buffer", d_x_routed_buffer, (num_local_tokens * topk, hidden_size)),
-        ("router_weight_buffer", router_weight_buffer, (num_local_tokens, topk)),
-        ("d_router_weight_buffer", d_router_weight_buffer, (num_local_tokens, topk)),
+        ("d_x_routed_buffer", d_x_routed_buffer, (token_capacity * topk, hidden_size)),
+        ("router_weight_buffer", router_weight_buffer, (token_capacity, topk)),
+        ("d_router_weight_buffer", d_router_weight_buffer, (token_capacity, topk)),
         ("w_shared_gate", w_shared_gate, (intermediate_size, hidden_size)),
         ("w_routed_gate", w_routed_gate, (num_local_experts, intermediate_size, hidden_size)),
         ("w_shared_up", w_shared_up, (intermediate_size, hidden_size)),
@@ -1295,8 +1297,6 @@ def fwd_epilogue(
     if y_shared.ndim != 2:
         raise ValueError("y_shared must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = y_shared.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if (topk_weights.device != y_shared.device
@@ -1320,6 +1320,9 @@ def bwd_epilogue(
 ) -> torch.Tensor:
     """Combines shared and routed input gradients.
 
+    topk is inferred as d_x_routed_buffer rows / num_local_tokens, so pass exactly the leading
+    num_local_tokens * topk rows of a capacity-sized buffer, not the whole buffer.
+
     Inputs:
         d_x_shared:        bfloat16 [num_local_tokens, hidden_size]
         d_x_routed_buffer: bfloat16 [num_local_tokens * topk, hidden_size]
@@ -1330,8 +1333,6 @@ def bwd_epilogue(
     if d_x_shared.ndim != 2:
         raise ValueError("d_x_shared must have shape (num_local_tokens, hidden_size)")
     num_local_tokens, hidden_size = d_x_shared.shape
-    if num_local_tokens < 512 or num_local_tokens % 256 != 0:
-        raise ValueError("num_local_tokens must be at least 512 and divisible by 256")
     if hidden_size <= 0 or hidden_size % 256 != 0:
         raise ValueError("hidden_size must be positive and divisible by 256")
     if d_x_routed_buffer.device != d_x_shared.device:
@@ -1339,10 +1340,12 @@ def bwd_epilogue(
     if d_x_routed_buffer.ndim != 2:
         raise ValueError("d_x_routed_buffer must have shape "
                          "(num_local_tokens * topk, hidden_size)")
-    if (d_x_routed_buffer.shape[1] != hidden_size
-            or d_x_routed_buffer.shape[0] % num_local_tokens != 0
-            or d_x_routed_buffer.shape[0] == 0
-            or d_x_routed_buffer.shape[0] > num_local_tokens * 255):
+    num_routes = d_x_routed_buffer.shape[0]
+    if num_local_tokens == 0:
+        valid_num_routes = num_routes == 0
+    else:
+        valid_num_routes = num_routes % num_local_tokens == 0 and 0 < num_routes <= num_local_tokens * 255
+    if d_x_routed_buffer.shape[1] != hidden_size or not valid_num_routes:
         raise ValueError("d_x_routed_buffer must have shape "
                          "(num_local_tokens * topk, hidden_size)")
 

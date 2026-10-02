@@ -29,7 +29,7 @@ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
     semaphore &gemm_outputs_arrived,
     semaphore &gemm_outputs_finished,
     uint32_t &gemm_bitfield,
-    const int num_tokens,
+    const int num_tokens,                   // routed: padded routed-token count; shared: local token count
     const int macrobatch_size,
     const int minibatch_size,
     const int macrobatch_idx,
@@ -72,7 +72,7 @@ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
         const int row_blocks = USE_ROUTED_MXFP8 ? a_gmem.rows() / config::MLP_Mb : a_gmem.cols() / config::MLP_Mb;
         const int expert_idx = IS_SHARED ? 0 : task_idx / (row_blocks * col_blocks);
         if constexpr (IS_SHARED) {
-            k_end = a_gmem.rows();
+            k_end = num_tokens;
         } else {
             int expert_row_offset = 0;
             for (int i = 0; i < expert_idx; ++i)
@@ -86,7 +86,7 @@ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
             tile_coord = {swizzled.x, swizzled.y, expert_idx};
         }
     } else if constexpr (IS_SHARED) {
-        const int row_blocks = a_gmem.rows() / config::MLP_Mb;
+        const int row_blocks = num_shared_row_blocks(num_tokens);
         const int num_tasks = row_blocks * col_blocks;
         if (task_idx < num_tasks) {
             const int2 swizzled = get_swizzled_2d_idx<config::MLP_SUPERGROUP_SIZE>(row_blocks, col_blocks, task_idx);
@@ -117,7 +117,7 @@ static __device__ __forceinline__ void expert_grouped_gemm_kernel(
     }
 
     const int first_gemm_iters = IS_WGRAD ? 0 : a_gmem.cols() / MLP_Kb;
-    const int iters_per_task = IS_WGRAD ? (k_end - k_start) / MLP_Kb
+    const int iters_per_task = IS_WGRAD ? (k_end - k_start + MLP_Kb - 1) / MLP_Kb // shared K may end mid-block; TMA zero-fills the rest
                                         : first_gemm_iters + (a2_gmem != nullptr ? a2_gmem->cols() / MLP_Kb : 0);
 
     auto wait_for_a_operand = [&]() {

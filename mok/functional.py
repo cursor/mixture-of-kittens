@@ -37,6 +37,7 @@ class MoKSchedule:
     peer_token_idx: torch.Tensor     # (schedule_capacity,) int32
     num_tokens: torch.Tensor         # (1,) int32
     tokens_per_expert: torch.Tensor  # (num_local_experts,) int32
+    num_local_tokens: int | None = None  # () rows the schedule was built from; None means the workspace capacity
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +57,7 @@ class MoKWorkspace:
     ep_rank: int                                      # () int
     ep_size: int                                      # () int
     device: torch.device                              # () torch.device
-    num_local_tokens: int                             # () int
+    num_local_tokens: int                             # () int, per-rank token capacity
     hidden_size: int                                  # () int
     topk: int                                         # () int
     schedule_capacity: int                            # () int
@@ -169,6 +170,9 @@ def create_workspace(
     topk: int,
 ) -> MoKWorkspace:
     """Creates a new caller-owned workspace.
+
+    num_local_tokens is a per-rank capacity and must be identical on every EP rank. Each call may then pass any
+    0 <= n <= num_local_tokens rows, independently per rank.
 
     Inputs:
         config:           MoKConfig
@@ -355,10 +359,13 @@ def build_schedule(
 ) -> MoKSchedule:
     """All-gathers routing choices and builds this rank's padded expert schedule.
 
+    Ranks may pass different row counts, each at most the workspace capacity. Rows past a rank's count are routed to
+    no expert, so the schedule equals the one built from routing padded to capacity with expert -1.
+
     Inputs:
         workspace:         MoKWorkspace
         config:            MoKConfig
-        top_experts:       int64 [num_local_tokens, topk]
+        top_experts:       int64 [num_local_tokens, topk], num_local_tokens <= workspace.num_local_tokens
         num_local_experts: int
 
     Outputs:
@@ -402,12 +409,16 @@ def build_schedule(
         raise TypeError("top_experts must have dtype torch.int64")
     if not top_experts.is_contiguous():
         raise ValueError("top_experts must be contiguous")
-    if tuple(top_experts.shape) != (workspace.num_local_tokens, workspace.topk):
-        raise ValueError("top_experts must have shape (num_local_tokens, topk)")
+    if (top_experts.ndim != 2 or top_experts.shape[1] != workspace.topk
+            or top_experts.shape[0] > workspace.num_local_tokens):
+        raise ValueError("top_experts must have shape (num_local_tokens, topk) within the workspace capacity")
     if type(num_local_experts) is not int or num_local_experts <= 0:
         raise ValueError("num_local_experts must be a positive integer")
 
-    top_experts_int32 = top_experts.to(torch.int32)
+    num_local_tokens = top_experts.shape[0]
+    top_experts_int32 = top_experts.new_empty((workspace.num_local_tokens, workspace.topk), dtype=torch.int32)
+    top_experts_int32[:num_local_tokens].copy_(top_experts)
+    top_experts_int32[num_local_tokens:].fill_(-1)
     all_gather_top_experts(
         top_experts_int32, workspace.all_gather_top_experts_buffer,
         workspace.all_gather_top_experts_buffer_multicast_ptr, workspace.ep_rank,
@@ -422,6 +433,7 @@ def build_schedule(
     return MoKSchedule(
         peer_rank=schedule_peer_rank, peer_token_idx=schedule_peer_token_idx,
         num_tokens=num_tokens, tokens_per_expert=tokens_per_expert,
+        num_local_tokens=num_local_tokens,
     )
 
 
@@ -439,7 +451,7 @@ def validate_inputs(
         config:         MoKConfig
         workspace:      MoKWorkspace
         schedule:       MoKSchedule
-        x:              bfloat16 [num_local_tokens, hidden_size]
+        x:              bfloat16 [num_local_tokens, hidden_size], num_local_tokens <= workspace.num_local_tokens
         router_weights: float32 [num_local_tokens, topk] | None
         grad_output:    bfloat16 [num_local_tokens, hidden_size] | None
 
@@ -452,12 +464,18 @@ def validate_inputs(
         raise TypeError("workspace must be a MoKWorkspace")
     if not isinstance(schedule, MoKSchedule):
         raise TypeError("schedule must be a MoKSchedule")
-    expected_activation_shape = (workspace.num_local_tokens, workspace.hidden_size)
+    num_local_tokens = x.shape[0] if x.ndim == 2 else -1
+    if not 0 <= num_local_tokens <= workspace.num_local_tokens:
+        raise ValueError("x must have shape (num_local_tokens, hidden_size) within the workspace capacity")
+    schedule_rows = workspace.num_local_tokens if schedule.num_local_tokens is None else schedule.num_local_tokens
+    if num_local_tokens != schedule_rows:
+        raise ValueError("x must have as many rows as the top_experts the schedule was built from")
+    expected_activation_shape = (num_local_tokens, workspace.hidden_size)
     tensors = [("x", x, torch.bfloat16, expected_activation_shape)]
     if grad_output is not None:
         tensors.append(("grad_output", grad_output, torch.bfloat16, expected_activation_shape))
     if router_weights is not None:
-        tensors.append(("router_weights", router_weights, torch.float32, (workspace.num_local_tokens, workspace.topk)))
+        tensors.append(("router_weights", router_weights, torch.float32, (num_local_tokens, workspace.topk)))
     for tensor_name, tensor, expected_dtype, expected_shape in tensors:
         if not tensor.is_cuda or tensor.device != workspace.device or tensor.dtype != expected_dtype or not tensor.is_contiguous():
             raise ValueError(f"{tensor_name} must be contiguous {expected_dtype} on the workspace CUDA device")
@@ -505,9 +523,10 @@ def forward(
         forward_context: MoKForwardContext
     """
     validate_inputs(config, workspace, schedule, x, router_weights)
+    num_local_tokens = x.shape[0]
 
-    workspace.x_buffer.copy_(x)  # TODO: we can remove this
-    workspace.router_weight_buffer.copy_(router_weights)
+    x_buffer = workspace.x_buffer[:num_local_tokens]
+    x_buffer.copy_(x)  # TODO: we can remove this
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
                 workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
 
@@ -520,7 +539,7 @@ def forward(
          up_shared, up_fp8_routed, up_sc_routed,
          hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed,
          y_shared, y_routed) = dispatch_mlp_swiglu_combine_fwd_mxfp8(
-            workspace.x_buffer, workspace.x_buffer_ptrs,
+            x_buffer, workspace.x_buffer_ptrs,
             workspace.combine_buffer, workspace.combine_buffer_ptrs,
             shared_gate_weights, routed_gate_weights_fp8, routed_gate_weights_sc,
             shared_up_weights, routed_up_weights_fp8, routed_up_weights_sc,
@@ -542,7 +561,7 @@ def forward(
     else:
         (x_routed, gate_shared, gate_routed, up_shared, up_routed,
          hidden_shared, hidden_routed, y_shared, y_routed) = dispatch_mlp_swiglu_combine_fwd_bf16(
-            workspace.x_buffer, workspace.x_buffer_ptrs,
+            x_buffer, workspace.x_buffer_ptrs,
             workspace.combine_buffer, workspace.combine_buffer_ptrs,
             shared_gate_weights, routed_gate_weights,
             shared_up_weights, routed_up_weights,
@@ -564,7 +583,8 @@ def forward(
 
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
                 workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
-    output = fwd_epilogue(y_shared, workspace.combine_buffer, workspace.router_weight_buffer)
+    combine_buffer = workspace.combine_buffer[:num_local_tokens * workspace.topk]
+    output = fwd_epilogue(y_shared, combine_buffer, router_weights)
     return output, forward_context
 
 
@@ -601,7 +621,8 @@ def recompute_forward_context(
     if isinstance(routed_gate_weights, tuple) and (len(routed_gate_weights) != 2 or len(routed_up_weights) != 2):
         raise ValueError("MXFP8 routed gate and up weights must be data/scale pairs")
 
-    workspace.x_buffer.copy_(x)
+    x_buffer = workspace.x_buffer[:x.shape[0]]
+    x_buffer.copy_(x)
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
                 workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
 
@@ -612,7 +633,7 @@ def recompute_forward_context(
          gate_shared, gate_fp8_routed, gate_sc_routed,
          up_shared, up_fp8_routed, up_sc_routed,
          hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed) = recompute_forward_context_mxfp8(
-            workspace.x_buffer, workspace.x_buffer_ptrs,
+            x_buffer, workspace.x_buffer_ptrs,
             shared_gate_weights, routed_gate_weights_fp8, routed_gate_weights_sc,
             shared_up_weights, routed_up_weights_fp8, routed_up_weights_sc,
             schedule.peer_rank, schedule.peer_token_idx,
@@ -627,7 +648,7 @@ def recompute_forward_context(
     else:
         (x_routed, gate_shared, gate_routed, up_shared, up_routed,
          hidden_shared, hidden_routed) = recompute_forward_context_bf16(
-            workspace.x_buffer, workspace.x_buffer_ptrs,
+            x_buffer, workspace.x_buffer_ptrs,
             shared_gate_weights, routed_gate_weights,
             shared_up_weights, routed_up_weights,
             schedule.peer_rank, schedule.peer_token_idx,
@@ -706,9 +727,12 @@ def backward(
     if not isinstance(forward_context, MoKForwardContext):
         raise TypeError("forward_context must be a MoKForwardContext")
 
-    workspace.d_y_buffer.copy_(grad_output)                # TODO: we can remove this
-    workspace.x_buffer.copy_(x)                            # TODO: we can remove this
-    workspace.router_weight_buffer.copy_(router_weights)   # TODO: we can remove this
+    num_local_tokens = x.shape[0]
+    d_y_buffer = workspace.d_y_buffer[:num_local_tokens]
+    x_buffer = workspace.x_buffer[:num_local_tokens]
+    d_y_buffer.copy_(grad_output)                                          # TODO: we can remove this
+    x_buffer.copy_(x)                                                      # TODO: we can remove this
+    workspace.router_weight_buffer[:num_local_tokens].copy_(router_weights)  # TODO: we can remove this
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
                 workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
     if isinstance(routed_gate_weights, tuple):
@@ -727,7 +751,7 @@ def backward(
          d_hidden_shared, d_hidden_routed, d_y_fp8_routed, d_y_sc_routed,
          d_w_shared_gate, d_w_routed_gate, d_w_shared_up, d_w_routed_up,
          d_w_shared_down, d_w_routed_down) = dispatch_mlp_swiglu_combine_bwd_mxfp8(
-            workspace.d_y_buffer, workspace.d_y_buffer_ptrs,
+            d_y_buffer, workspace.d_y_buffer_ptrs,
             workspace.d_x_routed_buffer, workspace.d_x_routed_buffer_ptrs,
             workspace.router_weight_buffer, workspace.router_weight_buffer_ptrs,
             workspace.d_router_weight_buffer, workspace.d_router_weight_buffer_ptrs,
@@ -738,7 +762,7 @@ def backward(
             forward_context.gate_shared, gate_fp8_routed, gate_sc_routed,
             forward_context.up_shared, up_fp8_routed, up_sc_routed,
             forward_context.hidden_shared, hidden_fp8_t_routed, hidden_sc_t_routed,
-            workspace.x_buffer, workspace.x_buffer_ptrs,
+            x_buffer, workspace.x_buffer_ptrs,
             routed_gate_weights_fp8, routed_gate_weights_sc,
             routed_up_weights_fp8, routed_up_weights_sc,
             schedule.peer_rank, schedule.peer_token_idx,
@@ -755,7 +779,7 @@ def backward(
          d_up_shared, d_up_routed, d_hidden_shared, d_hidden_routed, d_y_routed,
          d_w_shared_gate, d_w_routed_gate, d_w_shared_up, d_w_routed_up,
          d_w_shared_down, d_w_routed_down) = dispatch_mlp_swiglu_combine_bwd_bf16(
-            workspace.d_y_buffer, workspace.d_y_buffer_ptrs,
+            d_y_buffer, workspace.d_y_buffer_ptrs,
             workspace.d_x_routed_buffer, workspace.d_x_routed_buffer_ptrs,
             workspace.router_weight_buffer, workspace.router_weight_buffer_ptrs,
             workspace.d_router_weight_buffer, workspace.d_router_weight_buffer_ptrs,
@@ -765,7 +789,7 @@ def backward(
             x_routed, forward_context.gate_shared, gate_routed,
             forward_context.up_shared, up_routed,
             forward_context.hidden_shared, hidden_routed,
-            workspace.x_buffer, workspace.x_buffer_ptrs,
+            x_buffer, workspace.x_buffer_ptrs,
             schedule.peer_rank, schedule.peer_token_idx,
             schedule.num_tokens, schedule.tokens_per_expert,
             workspace.topk, swiglu_limit, config.bwd_num_comm_sms,
@@ -774,7 +798,7 @@ def backward(
 
     barrier_all(workspace.barrier_buffer, workspace.barrier_buffer_ptrs,
                 workspace.barrier_buffer_multicast_ptr, workspace.barrier_target)
-    d_x = bwd_epilogue(d_x_shared, workspace.d_x_routed_buffer)
-    d_router_weights = workspace.d_router_weight_buffer.clone()  # TODO: we can remove this
+    d_x = bwd_epilogue(d_x_shared, workspace.d_x_routed_buffer[:num_local_tokens * workspace.topk])
+    d_router_weights = workspace.d_router_weight_buffer[:num_local_tokens].clone()  # TODO: we can remove this
     return (d_x, d_router_weights, d_w_routed_gate, d_w_routed_up, d_w_routed_down,
             d_w_shared_gate, d_w_shared_up, d_w_shared_down)

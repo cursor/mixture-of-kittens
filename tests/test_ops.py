@@ -198,7 +198,7 @@ def test_schedule(context: tuple[int, int, torch.device]) -> None:
             )
 
     num_local_experts = 1
-    num_local_tokens = 512
+    num_local_tokens = 1280
     topk = 1
     schedule_capacity = num_local_tokens * topk
     route_pattern = torch.arange(

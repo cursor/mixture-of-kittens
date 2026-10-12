@@ -591,6 +591,7 @@ def test_dispatch_mlp_swiglu_combine_fwd_mxfp8(
     for failure_name, overrides, expected_exception in (
         ("input rank", {"x": workspace.x_buffer.unsqueeze(0)}, ValueError),
         ("top-k", {"topk": 0}, ValueError),
+        ("swiglu limit", {"swiglu_limit": 0.0}, ValueError),
         ("communication SMs", {"num_comm_sms": 1}, ValueError),
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
@@ -954,6 +955,7 @@ def test_recompute_forward_context_mxfp8(
     for failure_name, overrides, expected_exception in (
         ("input rank", {"x": workspace.x_buffer.unsqueeze(0)}, ValueError),
         ("top-k", {"topk": 0}, ValueError),
+        ("swiglu limit", {"swiglu_limit": 0.0}, ValueError),
         ("communication SMs", {"num_comm_sms": 1}, ValueError),
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
@@ -1192,6 +1194,7 @@ def test_dispatch_mlp_swiglu_combine_fwd_bf16(
     for failure_name, overrides, expected_exception in (
         ("input rank", {"x": workspace.x_buffer.unsqueeze(0)}, ValueError),
         ("top-k", {"topk": 0}, ValueError),
+        ("swiglu limit", {"swiglu_limit": 0.0}, ValueError),
         ("communication SMs", {"num_comm_sms": 1}, ValueError),
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
@@ -1467,6 +1470,7 @@ def test_recompute_forward_context_bf16(
     for failure_name, overrides, expected_exception in (
         ("input rank", {"x": workspace.x_buffer.unsqueeze(0)}, ValueError),
         ("top-k", {"topk": 0}, ValueError),
+        ("swiglu limit", {"swiglu_limit": 0.0}, ValueError),
         ("communication SMs", {"num_comm_sms": 1}, ValueError),
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
@@ -1876,6 +1880,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
     for failure_name, overrides, expected_exception in (
         ("input rank", {"x": workspace.x_buffer.unsqueeze(0)}, ValueError),
         ("top-k", {"topk": 0}, ValueError),
+        ("swiglu limit", {"swiglu_limit": 0.0}, ValueError),
         ("communication SMs", {"num_comm_sms": 1}, ValueError),
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
@@ -2219,6 +2224,7 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
     for failure_name, overrides, expected_exception in (
         ("input rank", {"x": workspace.x_buffer.unsqueeze(0)}, ValueError),
         ("top-k", {"topk": 0}, ValueError),
+        ("swiglu limit", {"swiglu_limit": 0.0}, ValueError),
         ("communication SMs", {"num_comm_sms": 1}, ValueError),
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),

@@ -65,6 +65,10 @@ MXFP8_RESULT_NAMES = (
 )
 
 
+def _noncontiguous_matrix_view(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.as_strided(tensor.shape, (1, tensor.shape[0]))
+
+
 def test_all_gather_top_experts(context: tuple[int, int, torch.device]) -> None:
     rank, world_size, device = context
     for shape in shapes(world_size):
@@ -595,6 +599,11 @@ def test_dispatch_mlp_swiglu_combine_fwd_mxfp8(
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
         ("pointer EP size", {"x_ptrs": workspace.x_buffer_ptrs[:-1]}, ValueError),
+        (
+            "non-contiguous weight",
+            {"w_shared_gate": _noncontiguous_matrix_view(w_shared_gate)},
+            ValueError,
+        ),
     ):
         try:
             dispatch_mlp_swiglu_combine_fwd_mxfp8(
@@ -1196,6 +1205,11 @@ def test_dispatch_mlp_swiglu_combine_fwd_bf16(
         ("minibatch alignment", {"minibatch_size": 128}, ValueError),
         ("macrobatch multiple", {"macrobatch_size": 384}, ValueError),
         ("pointer EP size", {"x_ptrs": workspace.x_buffer_ptrs[:-1]}, ValueError),
+        (
+            "non-contiguous weight",
+            {"w_shared_gate": _noncontiguous_matrix_view(w_shared_gate)},
+            ValueError,
+        ),
     ):
         try:
             dispatch_mlp_swiglu_combine_fwd_bf16(
@@ -1885,6 +1899,11 @@ def test_dispatch_mlp_swiglu_combine_bwd_mxfp8(
             {"d_y_buffer": workspace.d_y_buffer[:, :-1]},
             ValueError,
         ),
+        (
+            "non-contiguous weight",
+            {"w_shared_gate": _noncontiguous_matrix_view(w_shared_gate)},
+            ValueError,
+        ),
     ):
         try:
             dispatch_mlp_swiglu_combine_bwd_mxfp8(
@@ -2226,6 +2245,11 @@ def test_dispatch_mlp_swiglu_combine_bwd_bf16(
         (
             "gradient output shape",
             {"d_y_buffer": workspace.d_y_buffer[:, :-1]},
+            ValueError,
+        ),
+        (
+            "non-contiguous weight",
+            {"w_shared_gate": _noncontiguous_matrix_view(w_shared_gate)},
             ValueError,
         ),
     ):

@@ -86,11 +86,21 @@ def check_nvcc() -> None:
             "Install the correct CUDA toolkit or ensure PATH points to its bin directory."
         )
 
+    # The extension links the CUDA runtime statically and ships only SASS for the target architecture, so it
+    # does not depend on PyTorch's CUDA runtime library. As with torch.utils.cpp_extension, a different major
+    # version is an error and a different minor version only a warning (CUDA minor version compatibility).
     torch_cuda_version = parse_major_minor_versions(str(torch.version.cuda), "PyTorch CUDA")
-    if nvcc_version != torch_cuda_version:
+    if nvcc_version[0] != torch_cuda_version[0]:
         raise RuntimeError(
             f"NVCC {nvcc_version[0]}.{nvcc_version[1]} does not match PyTorch CUDA {torch.version.cuda}. "
-            "Install the matching CUDA toolkit or ensure PATH points to its bin directory."
+            "Install a CUDA toolkit with the same major version or ensure PATH points to its bin directory."
+        )
+    if nvcc_version != torch_cuda_version:
+        warnings.warn(
+            f"NVCC {nvcc_version[0]}.{nvcc_version[1]} differs in minor version from PyTorch CUDA {torch.version.cuda}; "
+            "the build continues under CUDA minor version compatibility.",
+            RuntimeWarning,
+            stacklevel=2,
         )
 
 

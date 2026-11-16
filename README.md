@@ -25,7 +25,7 @@ See our [paper](https://arxiv.org/abs/2609.36070) and [blog post](https://cursor
 
 ### PyTorch and CUDA
 
-The installed PyTorch build must target CUDA 13.0+, and its CUDA version must match the major and minor version of the system CUDA toolkit. MoK is built and tested against CUDA 13.0, but later versions should work as well.
+The installed PyTorch build must target CUDA 13.0+, and its CUDA version must match the major version of the system CUDA toolkit; a different minor version only prints a warning, since MoK links the CUDA runtime statically. MoK is built and tested against CUDA 13.0, but later versions should work as well.
 
 For example, to install PyTorch 2.10 built against CUDA 13.0:
 
